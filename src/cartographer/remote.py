@@ -6,14 +6,19 @@ import json
 import subprocess
 from pathlib import Path
 
-from cartographer.anchor import identity, verify_excerpt
+from cartographer.anchor import verify_excerpt
 
 SOURCES_NAME = "sources.json"
 
-# Status values per fact identity
+# Status values per fact anchor
 OK = "ok"
 DRIFTED = "drifted"
 UNVERIFIABLE = "unverifiable"
+
+
+def anchor_key(fact: dict) -> tuple:
+    a = fact["anchor"]
+    return (a["path"], tuple(a["lines"] or ()), a["content_hash"])
 
 
 def load_sources(map_root: Path) -> dict:
@@ -66,36 +71,36 @@ def fact_status(
     anchor = fact["anchor"]
     rel = Path(anchor["path"])
     folder = rel.parts[0] if rel.parts else ""
+    p = Path(world) / anchor["path"]
+    if p.exists():
+        return OK if verify_excerpt(p.read_text(), anchor) else DRIFTED
+    src = sources.get(folder)
+    if src:
+        path_in_repo = str(Path(*rel.parts[1:])) if len(rel.parts) > 1 else ""
+        key = (folder, path_in_repo)
+        if _cache is not None and key in _cache:
+            text = _cache[key]
+        else:
+            text = fetch(src, path_in_repo)
+            if _cache is not None:
+                _cache[key] = text
+        if text is None:
+            return UNVERIFIABLE
+        return OK if verify_excerpt(text, anchor) else DRIFTED
     local = Path(world) / folder
     if local.exists():
-        p = Path(world) / anchor["path"]
-        if p.exists():
-            return OK if verify_excerpt(p.read_text(), anchor) else DRIFTED
         return DRIFTED
-    src = sources.get(folder)
-    if not src:
-        return UNVERIFIABLE
-    path_in_repo = str(Path(*rel.parts[1:])) if len(rel.parts) > 1 else ""
-    key = (folder, path_in_repo)
-    if _cache is not None and key in _cache:
-        text = _cache[key]
-    else:
-        text = fetch(src, path_in_repo)
-        if _cache is not None:
-            _cache[key] = text
-    if text is None:
-        return UNVERIFIABLE
-    return OK if verify_excerpt(text, anchor) else DRIFTED
+    return UNVERIFIABLE
 
 
 def chart_status(
     chart_dir: Path, world: Path, facts: list[dict], fetch=fetch_remote_file
 ) -> dict[tuple, str]:
-    """Status per fact identity for a whole chart. One fetch per unique
+    """Status per fact anchor for a whole chart. One fetch per unique
     remote file (cached within the call)."""
     sources = load_sources(Path(chart_dir).resolve().parent)
     cache: dict = {}
     return {
-        identity(f): fact_status(world, sources, f, fetch=fetch, _cache=cache)
+        anchor_key(f): fact_status(world, sources, f, fetch=fetch, _cache=cache)
         for f in facts
     }

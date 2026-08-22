@@ -30,6 +30,12 @@ def lint_facts(facts: list[dict]) -> list[str]:
         # index required keys directly). Fail closed with what we know.
         return problems
 
+    for f in facts:
+        for p in {f["path"], (f.get("anchor") or {}).get("path") or f["path"]}:
+            parts = Path(p).parts
+            if Path(p).is_absolute() or ".." in parts:
+                problems.append(f"unsafe path {p!r} (absolute or ..): {f['subject']}")
+
     seen: dict[tuple, str] = {}
     for f in facts:
         ident = (f["subject"], f["predicate"], f["object"], f["scope"])

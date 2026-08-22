@@ -169,6 +169,24 @@ def test_load_chart_returns_problems_without_raising(tmp_path):
     assert len(facts) == 1 and problems
 
 
+def test_lint_rejects_traversal_and_absolute_paths():
+    from cartographer.map_loader import lint_facts
+
+    traversal = _anchored_fact(path="../../../etc/passwd")
+    traversal["anchor"] = dict(traversal["anchor"], path="../../../etc/passwd")
+    absolute = _anchored_fact(path="/etc/hostname")
+    absolute["anchor"] = dict(absolute["anchor"], path="/etc/hostname")
+    clean = _anchored_fact()
+
+    trav_problems = lint_facts([traversal])
+    assert any("unsafe path" in p for p in trav_problems)
+
+    abs_problems = lint_facts([absolute])
+    assert any("unsafe path" in p for p in abs_problems)
+
+    assert not any("unsafe path" in p for p in lint_facts([clean]))
+
+
 def test_load_sealed_chart_fails_closed_on_manifest_absence(tmp_path):
     """Serving with NO manifest at all must fail closed (MCP v1 hardening
     2026-07-14): absence would otherwise silently bypass verification."""

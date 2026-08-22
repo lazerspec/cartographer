@@ -14,11 +14,12 @@ from cartographer.mcp_server import (
     STALE_MARK,
     UNVERIFIED_MARK,
     chart_index,
+    compute_status,
     get_scope_facts,
     staleness_check,
     who_mentions,
 )
-from cartographer.remote import chart_status
+from cartographer.remote import DRIFTED, anchor_key, chart_status
 
 
 def write_manifest(chart_dir: Path) -> None:
@@ -378,3 +379,105 @@ def test_staleness_check_unchanged_by_feature(tmp_path):
     chart, world = _mint(tmp_path)
     out = staleness_check(chart, world)
     assert out.startswith("verified ")
+
+
+# --- Fix 1/2/4: anchor-keyed snapshot, per-file local check, safe startup --
+
+
+def _remote_only_chart(tmp_path, text: str):
+    """A chart with one remote fact (svc-b not checked out in `world`),
+    sources.json pointing at it, sealed via cartographer.cli.seal."""
+    from cartographer.cli import seal
+
+    tmp = tmp_path
+    world = tmp / "workspace"
+    world.mkdir()
+    origin = tmp / "origin"
+    (origin / "svc-b" / "src").mkdir(parents=True)
+    (origin / "svc-b" / "src" / "consume.py").write_text(text)
+    map_root = tmp / "map"
+    chart = map_root / "chart"
+    chart.mkdir(parents=True)
+    (map_root / "sources.json").write_text(
+        json.dumps({"svc-b": {"repo": "acme/svc-b"}})
+    )
+    f = {
+        "subject": "svc-b",
+        "predicate": "consumes_event",
+        "object": "EventA",
+        "scope": "svc-b",
+        "owner": "t",
+        "path": "svc-b/src/consume.py",
+        "external": True,
+        "anchor": make_code_anchor(
+            origin, "svc-b/src/consume.py", (1, 3), "r1", "2026-08-21"
+        ),
+    }
+    (chart / "flow.json").write_text(json.dumps([f], indent=1))
+    seal(chart)
+    return chart, world, origin, f
+
+
+def test_reanchored_remote_fact_is_unverified_not_clean(tmp_path):
+    from cartographer.cli import seal
+
+    text = "def consume():\n    handle('EventA')\n    return True\n"
+    chart, world, origin, f = _remote_only_chart(tmp_path, text)
+
+    # startup snapshot: remote fetch matches -> OK, keyed by the OLD anchor
+    facts = json.loads((chart / "flow.json").read_text())
+    status = chart_status(chart, world, facts, fetch=lambda s, p: text)
+    assert status[anchor_key(f)] == "ok"
+
+    # mid-session: curator re-anchors the fact (new lines/hash), re-seals
+    f2 = dict(f)
+    f2["anchor"] = make_code_anchor(
+        origin, "svc-b/src/consume.py", (2, 2), "r2", "2026-08-22"
+    )
+    (chart / "flow.json").write_text(json.dumps([f2], indent=1))
+    seal(chart)
+
+    # tool call reuses the OLD (frozen) status: the new anchor key misses
+    out = get_scope_facts(chart, world, status, "svc-b")
+    assert UNVERIFIED_MARK in out
+    assert "NOTE:" in out
+    assert STALE_MARK not in out
+
+
+def test_split_uses_live_local_file_over_snapshot(tmp_path):
+    world = tmp_path / "workspace"
+    (world / "svc-b" / "src").mkdir(parents=True)
+    text = "def consume():\n    handle('EventA')\n    return True\n"
+    (world / "svc-b" / "src" / "consume.py").write_text(text)
+    chart = tmp_path / "chart"
+    chart.mkdir()
+    f = {
+        "subject": "svc-b",
+        "predicate": "consumes_event",
+        "object": "EventA",
+        "scope": "svc-b",
+        "owner": "t",
+        "path": "svc-b/src/consume.py",
+        "external": True,
+        "anchor": make_code_anchor(
+            world, "svc-b/src/consume.py", (1, 3), "r1", "2026-08-21"
+        ),
+    }
+    (chart / "flow.json").write_text(json.dumps([f]))
+    write_manifest(chart)
+
+    # status dict falsely claims this exact anchor is DRIFTED; the live
+    # local file matches, so live local must win over the snapshot.
+    bad_status = {anchor_key(f): DRIFTED}
+    out = get_scope_facts(chart, world, bad_status, "svc-b")
+    assert STALE_MARK not in out
+    assert UNVERIFIED_MARK not in out
+
+
+def test_compute_status_returns_empty_on_broken_chart(tmp_path):
+    chart = tmp_path / "chart"
+    chart.mkdir()
+    (chart / "bad.json").write_text(json.dumps([{"subject": "x"}]))  # fails lint
+    world = tmp_path / "world"
+    world.mkdir()
+    assert compute_status(chart, world) == {}

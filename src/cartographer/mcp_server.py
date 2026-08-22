@@ -13,10 +13,16 @@ Derived-tier facts serve only via get_derived_facts.
 import argparse
 from pathlib import Path
 
-from cartographer.anchor import identity, verify_anchor
+from cartographer.anchor import verify_anchor
 from cartographer.chart_context import _fact_line, context_hash, render_core_context
-from cartographer.map_loader import LintError, load_sealed_chart
-from cartographer.remote import DRIFTED, UNVERIFIABLE, chart_status, fetch_remote_file
+from cartographer.map_loader import load_sealed_chart
+from cartographer.remote import (
+    DRIFTED,
+    UNVERIFIABLE,
+    anchor_key,
+    chart_status,
+    fetch_remote_file,
+)
 
 DISCLAIMER = (
     "The map is sparse and verified: absence of a fact is not evidence of absence."
@@ -29,24 +35,26 @@ UNVERIFIED_MARK = " [UNVERIFIED: no local checkout, remote unreachable]"
 def _split(
     world: Path, status: dict, facts: list[dict]
 ) -> tuple[set[tuple], set[tuple]]:
-    """Per served fact: a local checkout re-verifies live (as 0.2.0); with
-    no local checkout, the fact's remote status (from the startup
-    snapshot) decides drifted vs unverifiable."""
+    """Per served fact: the FILE's presence decides local vs snapshot (a
+    file gone from a partially-checked-out folder must not shadow a
+    remote source). A local file re-verifies live (as 0.2.0); with no
+    local file, the fact's status from the startup snapshot (keyed by
+    anchor, not fact identity, so a re-anchored fact misses and defaults
+    to unverifiable) decides drifted vs unverifiable."""
     drifted: set[tuple] = set()
     unverifiable: set[tuple] = set()
     for f in facts:
         anchor = f["anchor"]
-        folder = Path(anchor["path"]).parts[0]
-        fid = identity(f)
-        if (Path(world) / folder).exists():
+        akey = anchor_key(f)
+        if (Path(world) / anchor["path"]).exists():
             if not verify_anchor(world, anchor):
-                drifted.add(fid)
+                drifted.add(akey)
         else:
-            s = status.get(fid, UNVERIFIABLE)
+            s = status.get(akey, UNVERIFIABLE)
             if s == DRIFTED:
-                drifted.add(fid)
+                drifted.add(akey)
             elif s == UNVERIFIABLE:
-                unverifiable.add(fid)
+                unverifiable.add(akey)
     return drifted, unverifiable
 
 
@@ -76,10 +84,10 @@ def _sorted_lines(
     lines = []
     for f in ordered:
         line = _fact_line(f)
-        fid = identity(f)
-        if drifted is not None and fid in drifted:
+        akey = anchor_key(f)
+        if drifted is not None and akey in drifted:
             line += STALE_MARK
-        elif unverifiable is not None and fid in unverifiable:
+        elif unverifiable is not None and akey in unverifiable:
             line += UNVERIFIED_MARK
         lines.append(line)
     return lines
@@ -175,15 +183,19 @@ def staleness_check(chart_dir: Path, world: Path, scope: str | None = None) -> s
     return head + f"; {len(drifted)} DRIFTED:\n" + "\n".join(_sorted_lines(drifted))
 
 
+def compute_status(chart_dir: Path, world: Path, fetch=fetch_remote_file) -> dict:
+    """Startup verification snapshot. On ANY failure returns {} so remote
+    facts default to unverifiable; serving stays fail-closed per call."""
+    try:
+        return chart_status(chart_dir, world, load_sealed_chart(chart_dir), fetch=fetch)
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 def build_server(chart_dir: Path, world: Path, fetch=fetch_remote_file):
     from mcp.server.fastmcp import FastMCP
 
-    try:
-        status = chart_status(
-            chart_dir, world, load_sealed_chart(chart_dir), fetch=fetch
-        )
-    except LintError:
-        status = {}
+    status = compute_status(chart_dir, world, fetch=fetch)
 
     app = FastMCP("cartographer")
 

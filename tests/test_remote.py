@@ -5,7 +5,9 @@ from cartographer.remote import (
     DRIFTED,
     OK,
     UNVERIFIABLE,
+    anchor_key,
     chart_status,
+    fact_status,
     fetch_remote_file,
 )
 from tests.test_cli import fact, write_chart, write_world
@@ -28,9 +30,7 @@ def test_local_checkout_wins(tmp_path):
     ]
     calls: list = []
     status = chart_status(chart, world, facts, fetch=_recording_fetch(calls))
-    from cartographer.anchor import identity
-
-    assert status[identity(facts[0])] == OK
+    assert status[anchor_key(facts[0])] == OK
     assert calls == []
 
 
@@ -65,18 +65,16 @@ def test_remote_ok_and_drifted(tmp_path):
     def fetch_ok(source, path_in_repo):
         return original_text
 
-    from cartographer.anchor import identity
-
     # world (unlike origin) has no svc-b checkout, so this exercises the
     # remote path
     status_ok = chart_status(chart, world, [f_local, f_remote], fetch=fetch_ok)
-    assert status_ok[identity(f_remote)] == OK
+    assert status_ok[anchor_key(f_remote)] == OK
 
     def fetch_drifted(source, path_in_repo):
         return "def consume():\n    handle('EventB')\n    return True\n"
 
     status_drifted = chart_status(chart, world, [f_remote], fetch=fetch_drifted)
-    assert status_drifted[identity(f_remote)] == DRIFTED
+    assert status_drifted[anchor_key(f_remote)] == DRIFTED
 
 
 def test_remote_unverifiable_paths(tmp_path):
@@ -94,18 +92,17 @@ def test_remote_unverifiable_paths(tmp_path):
     (origin / "svc-c" / "src").mkdir()
     (origin / "svc-c" / "src" / "x.py").write_text("def x():\n    pass\n")
     f_no_source = fact(origin, "svc-c", "consumes_event", "EventA", "svc-c/src/x.py")
-    from cartographer.anchor import identity
 
     # (a) folder absent from sources entirely
     status = chart_status(chart, world, [f_no_source], fetch=lambda s, p: "text")
-    assert status[identity(f_no_source)] == UNVERIFIABLE
+    assert status[anchor_key(f_no_source)] == UNVERIFIABLE
 
     # (b) folder in sources but fetch returns None
     (map_root / "sources.json").write_text(
         json.dumps({"svc-c": {"repo": "acme/svc-c", "branch": "main"}})
     )
     status = chart_status(chart, world, [f_no_source], fetch=lambda s, p: None)
-    assert status[identity(f_no_source)] == UNVERIFIABLE
+    assert status[anchor_key(f_no_source)] == UNVERIFIABLE
 
 
 def test_fetch_cache_one_call_per_file(tmp_path):
@@ -162,3 +159,78 @@ def test_fetch_remote_file_command_shape(monkeypatch):
 
     monkeypatch.setattr("cartographer.remote.subprocess.run", fake_run_fail)
     assert fetch_remote_file(source, "src/a.py") is None
+
+
+# --- Fix 2: per-file local/remote decision, sources as fallback ------------
+
+
+def test_partial_local_checkout_uses_remote(tmp_path):
+    """The service's folder exists locally (partial checkout) but the
+    pinned file itself does not; sources.json maps the folder. This used
+    to be a false DRIFTED (folder present => never consult remote)."""
+    world = tmp_path / "workspace"
+    (world / "svc-b" / "other").mkdir(parents=True)
+    (world / "svc-b" / "other" / "unrelated.py").write_text("x\n")
+    origin = _origin_with_svc_b(
+        tmp_path, "def consume():\n    handle('EventA')\n    return True\n"
+    )
+    original_text = (origin / "svc-b" / "src" / "consume.py").read_text()
+    f_remote = fact(origin, "svc-b", "consumes_event", "EventA", "svc-b/src/consume.py")
+    sources = {"svc-b": {"repo": "acme/svc-b", "branch": "main"}}
+
+    assert fact_status(world, sources, f_remote, fetch=lambda s, p: original_text) == OK
+    assert (
+        fact_status(
+            world, sources, f_remote, fetch=lambda s, p: "def consume():\n    pass\n"
+        )
+        == DRIFTED
+    )
+
+
+def test_folder_name_collision_with_file_uses_remote(tmp_path):
+    """The workspace has a FILE named like the service's folder (not a
+    directory); the pinned path under it can never exist locally, so the
+    remote path must be taken."""
+    world = tmp_path / "workspace"
+    world.mkdir()
+    (world / "svc-b").write_text("i am a file, not the svc-b checkout\n")
+    origin = _origin_with_svc_b(
+        tmp_path, "def consume():\n    handle('EventA')\n    return True\n"
+    )
+    original_text = (origin / "svc-b" / "src" / "consume.py").read_text()
+    f_remote = fact(origin, "svc-b", "consumes_event", "EventA", "svc-b/src/consume.py")
+    sources = {"svc-b": {"repo": "acme/svc-b", "branch": "main"}}
+    calls: list = []
+
+    def fetch(source, path_in_repo):
+        calls.append((source, path_in_repo))
+        return original_text
+
+    assert fact_status(world, sources, f_remote, fetch=fetch) == OK
+    assert calls == [({"repo": "acme/svc-b", "branch": "main"}, "src/consume.py")]
+
+
+def test_local_file_deleted_no_source_is_drifted(tmp_path):
+    """Folder exists locally, the pinned file is gone from it, and there
+    is no sources.json entry to fall back on: a locally deleted file is
+    drift, as before."""
+    world = tmp_path / "workspace"
+    (world / "svc-b" / "src").mkdir(parents=True)
+    (world / "svc-b" / "src" / "other.py").write_text("y\n")
+    origin = _origin_with_svc_b(
+        tmp_path, "def consume():\n    handle('EventA')\n    return True\n"
+    )
+    f_remote = fact(origin, "svc-b", "consumes_event", "EventA", "svc-b/src/consume.py")
+    assert fact_status(world, {}, f_remote) == DRIFTED
+
+
+def test_anchor_key_changes_on_reanchor(tmp_path):
+    world = tmp_path / "workspace"
+    (world / "svc-b" / "src").mkdir(parents=True)
+    (world / "svc-b" / "src" / "consume.py").write_text(
+        "def consume():\n    handle('EventA')\n    return True\n"
+    )
+    f1 = fact(world, "svc-b", "consumes_event", "EventA", "svc-b/src/consume.py")
+    f2 = dict(f1)
+    f2["anchor"] = dict(f1["anchor"], lines=[2, 2], content_hash="sha256:" + "0" * 64)
+    assert anchor_key(f1) != anchor_key(f2)

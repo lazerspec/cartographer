@@ -11,7 +11,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-from cartographer.anchor import identity
 from cartographer.chart_context import _fact_line
 from cartographer.map_loader import (
     MANIFEST_NAME,
@@ -19,7 +18,7 @@ from cartographer.map_loader import (
     lint_facts,
     load_sealed_chart,
 )
-from cartographer.remote import chart_status, fetch_remote_file
+from cartographer.remote import anchor_key, chart_status, fetch_remote_file
 
 
 def seal(chart_dir: Path) -> str:
@@ -74,8 +73,8 @@ def check(
     drifted, unverifiable = _split(world, status, facts)
     n_verified = len(facts) - len(drifted) - len(unverifiable)
     print(f"verified {n_verified}/{len(facts)} anchors against {world}")
-    drifted_facts = [f for f in facts if identity(f) in drifted]
-    unverifiable_facts = [f for f in facts if identity(f) in unverifiable]
+    drifted_facts = [f for f in facts if anchor_key(f) in drifted]
+    unverifiable_facts = [f for f in facts if anchor_key(f) in unverifiable]
     if not drifted_facts:
         print("0 drifted")
     else:
