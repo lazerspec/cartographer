@@ -1,0 +1,170 @@
+"""Anchor schema + ladder. All key-free."""
+
+from pathlib import Path
+
+from cartographer.anchor import (
+    Disposition,
+    dispose,
+    excerpt_hash,
+    identity,
+    make_code_anchor,
+    make_external_anchor,
+    normalize,
+    run_ladder,
+    verify_anchor,
+)
+
+AT = "2026-07-03T00:00:00Z"
+
+
+def _fact(anchor: dict) -> dict:
+    return {
+        "subject": "svc",
+        "predicate": "reads_field",
+        "object": "f",
+        "scope": "s",
+        "owner": "t",
+        "path": anchor["path"],
+        "anchor": anchor,
+    }
+
+
+def _world(tmp_path: Path, name: str, files: dict[str, str]) -> Path:
+    root = tmp_path / name
+    for rel, content in files.items():
+        p = root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content)
+    return root
+
+
+def test_normalize_strips_trailing_ws_and_crlf_only():
+    assert normalize("a  \r\nb\t\n") == "a\nb"
+    assert normalize("  indented\n") == "  indented"  # leading ws preserved
+
+
+def test_excerpt_hash_stable_under_trailing_ws():
+    assert excerpt_hash("x: 1  \n") == excerpt_hash("x: 1\n")
+    assert excerpt_hash("x: 1") != excerpt_hash("x: 2")
+
+
+def test_make_and_verify_code_anchor(tmp_path):
+    w = _world(tmp_path, "w0", {"r/f.yaml": "a: 1\nb: 2\nc: 3\n"})
+    a = make_code_anchor(w, "r/f.yaml", (2, 3), "step-00", AT)
+    assert a["kind"] == "code" and a["lines"] == [2, 3]
+    assert a["revision"] == "step-00" and a["verified_at"] == AT
+    assert verify_anchor(w, a)
+
+
+def test_whole_file_anchor_lines_null(tmp_path):
+    w = _world(tmp_path, "w0", {"r/f.yaml": "a: 1\n"})
+    a = make_code_anchor(w, "r/f.yaml", None, "step-00", AT)
+    assert a["lines"] is None
+    assert verify_anchor(w, a)
+
+
+def test_external_anchor_has_retrieved_at(tmp_path):
+    w = _world(tmp_path, "w0", {"partner-specs/spec.md": "v1\n"})
+    a = make_external_anchor(w, "partner-specs/spec.md", "step-00", AT)
+    assert a["kind"] == "external" and a["lines"] is None
+    assert a["retrieved_at"] == AT
+    assert verify_anchor(w, a)
+
+
+def test_untouched_file_is_l1_without_bump(tmp_path):
+    w0 = _world(tmp_path, "w0", {"r/f.yaml": "a: 1\nb: 2\n"})
+    w1 = _world(tmp_path, "w1", {"r/f.yaml": "a: 1\nb: 2\n"})
+    f = _fact(make_code_anchor(w0, "r/f.yaml", (1, 1), "step-00", AT))
+    d = dispose(
+        w0,
+        w1,
+        f,
+        changed=set(),
+        deleted=set(),
+        created=set(),
+        revision="step-01",
+        at=AT,
+    )
+    assert d.tier == "L1" and d.new_anchor is None
+
+
+def test_intact_excerpt_in_changed_file_is_l1_with_bump(tmp_path):
+    w0 = _world(tmp_path, "w0", {"r/f.yaml": "a: 1\nb: 2\n"})
+    w1 = _world(tmp_path, "w1", {"r/f.yaml": "a: 1\nb: 2\nc: 3\n"})
+    f = _fact(make_code_anchor(w0, "r/f.yaml", (1, 2), "step-00", AT))
+    d = dispose(w0, w1, f, {"r/f.yaml"}, set(), set(), "step-01", AT)
+    assert d.tier == "L1"
+    assert d.new_anchor is not None and d.new_anchor["revision"] == "step-01"
+
+
+def test_unique_relocation_is_l2(tmp_path):
+    w0 = _world(tmp_path, "w0", {"r/f.yaml": "a: 1\nb: 2\n"})
+    w1 = _world(tmp_path, "w1", {"r/f.yaml": "new: 0\na: 1\nb: 2\n"})
+    f = _fact(make_code_anchor(w0, "r/f.yaml", (1, 2), "step-00", AT))
+    d = dispose(w0, w1, f, {"r/f.yaml"}, set(), set(), "step-01", AT)
+    assert d.tier == "L2" and d.new_anchor["lines"] == [2, 3]
+
+
+def test_duplicate_excerpt_is_ambiguous_l3(tmp_path):
+    w0 = _world(tmp_path, "w0", {"r/f.yaml": "x: 9\na: 1\n"})
+    w1 = _world(tmp_path, "w1", {"r/f.yaml": "a: 1\npad: 0\na: 1\n"})
+    f = _fact(make_code_anchor(w0, "r/f.yaml", (2, 2), "step-00", AT))
+    d = dispose(w0, w1, f, {"r/f.yaml"}, set(), set(), "step-01", AT)
+    assert d.tier == "L3" and d.ambiguous
+
+
+def test_changed_excerpt_is_l3(tmp_path):
+    w0 = _world(tmp_path, "w0", {"r/f.yaml": "a: 1\n"})
+    w1 = _world(tmp_path, "w1", {"r/f.yaml": "a: 2\n"})
+    f = _fact(make_code_anchor(w0, "r/f.yaml", (1, 1), "step-00", AT))
+    d = dispose(w0, w1, f, {"r/f.yaml"}, set(), set(), "step-01", AT)
+    assert d.tier == "L3" and not d.ambiguous
+
+
+def test_rename_follow_is_l2_with_new_path(tmp_path):
+    body = "a: 1\nb: 2\n"
+    w0 = _world(tmp_path, "w0", {"r/old.py": body})
+    w1 = _world(tmp_path, "w1", {"r/new.py": body})
+    f = _fact(make_code_anchor(w0, "r/old.py", (1, 1), "step-00", AT))
+    d = dispose(w0, w1, f, set(), {"r/old.py"}, {"r/new.py"}, "step-01", AT)
+    assert d.tier == "L2" and d.new_anchor["path"] == "r/new.py"
+
+
+def test_rename_follow_evolved_excerpt_is_l3_carrying_twin(tmp_path):
+    """The anchor predates the step: the file evolved (stale excerpt), then
+    got renamed. Rename-follow finds the twin by identical whole-file hash
+    but cannot place the excerpt in it -> L3 carrying relocate_to, so any
+    widened re-anchor is computed against the twin, not the deleted path."""
+    seed = _world(tmp_path, "seed", {"r/old.py": "a = 1\nb = 2\n"})
+    f = _fact(make_code_anchor(seed, "r/old.py", (1, 1), "step-00", AT))
+    evolved = "a = 99\nb = 2\n"  # the anchored excerpt "a = 1" is gone
+    w0 = _world(tmp_path, "w0", {"r/old.py": evolved})
+    w1 = _world(tmp_path, "w1", {"r/new.py": evolved})
+    d = dispose(w0, w1, f, set(), {"r/old.py"}, {"r/new.py"}, "step-01", AT)
+    assert d.tier == "L3" and not d.ambiguous
+    assert d.relocate_to == "r/new.py"
+
+
+def test_deleted_without_twin_is_l4(tmp_path):
+    w0 = _world(tmp_path, "w0", {"r/old.py": "a: 1\n"})
+    w1 = _world(tmp_path, "w1", {"r/keep.py": "other\n"})
+    f = _fact(make_code_anchor(w0, "r/old.py", (1, 1), "step-00", AT))
+    d = dispose(w0, w1, f, set(), {"r/old.py"}, set(), "step-01", AT)
+    assert d.tier == "L4"
+
+
+def test_external_mismatch_is_l3_never_l2(tmp_path):
+    w0 = _world(tmp_path, "w0", {"partner-specs/spec.md": "seconds\n"})
+    w1 = _world(tmp_path, "w1", {"partner-specs/spec.md": "millis\n"})
+    f = _fact(make_external_anchor(w0, "partner-specs/spec.md", "step-00", AT))
+    d = dispose(w0, w1, f, {"partner-specs/spec.md"}, set(), set(), "step-01", AT)
+    assert d.tier == "L3"
+
+
+def test_run_ladder_keys_by_identity(tmp_path):
+    w0 = _world(tmp_path, "w0", {"r/f.yaml": "a: 1\n"})
+    w1 = _world(tmp_path, "w1", {"r/f.yaml": "a: 1\n"})
+    f = _fact(make_code_anchor(w0, "r/f.yaml", (1, 1), "step-00", AT))
+    out = run_ladder(w0, w1, [f], set(), set(), set(), "step-01", AT)
+    assert identity(f) in out
+    assert isinstance(out[identity(f)], Disposition)

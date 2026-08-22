@@ -1,0 +1,147 @@
+"""Cartographer command line: init, seal, check, serve.
+
+Humans approve, tools verify: `seal` refuses charts that fail lint, `check`
+never modifies anything, and nothing here edits facts automatically.
+"""
+
+import argparse
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+from cartographer.anchor import verify_anchor
+from cartographer.chart_context import _fact_line
+from cartographer.map_loader import (
+    MANIFEST_NAME,
+    LintError,
+    lint_facts,
+    load_sealed_chart,
+)
+
+
+def seal(chart_dir: Path) -> str:
+    """Recompute chart.manifest after human-approved edits. Refuses to seal
+    a chart that fails lint (a sealed chart must always serve)."""
+    chart_dir = Path(chart_dir)
+    if not chart_dir.is_dir():
+        raise SystemExit(f"not a directory: {chart_dir}")
+    facts: list[dict] = []
+    files: dict[str, str] = {}
+    for p in sorted(chart_dir.glob("*.json")):
+        try:
+            loaded = json.loads(p.read_text())
+        except json.JSONDecodeError as e:
+            raise SystemExit(f"invalid JSON in {p.name}: {e}") from e
+        if not isinstance(loaded, list):
+            raise SystemExit(f"{p.name}: top level must be a JSON list of facts")
+        facts.extend(loaded)
+        files[p.name] = "sha256:" + hashlib.sha256(p.read_bytes()).hexdigest()
+    problems = lint_facts(facts)
+    if problems:
+        raise SystemExit(
+            "refusing to seal a chart that fails lint:\n" + "\n".join(problems)
+        )
+    manifest = {"files": files, "fact_count": len(facts)}
+    (chart_dir / MANIFEST_NAME).write_text(json.dumps(manifest, indent=1) + "\n")
+    return f"sealed {chart_dir}: {len(files)} files, {len(facts)} facts"
+
+
+def check(chart_dir: Path, world: Path) -> int:
+    """Verify every fact's anchor against the live code. Read-only.
+    Exit codes: 0 clean, 1 drifted facts need review, 2 chart refused."""
+    try:
+        facts = load_sealed_chart(Path(chart_dir))
+    except LintError as e:
+        print("CHART REFUSED (fail-closed):", file=sys.stderr)
+        for problem in e.problems:
+            print(f"  {problem}", file=sys.stderr)
+        return 2
+    world = Path(world)
+    drifted = [f for f in facts if not verify_anchor(world, f["anchor"])]
+    print(f"verified {len(facts) - len(drifted)}/{len(facts)} anchors against {world}")
+    if not drifted:
+        print("0 drifted")
+        return 0
+    print(f"{len(drifted)} DRIFTED (re-confirm each fact, then re-seal):")
+    ordered = sorted(drifted, key=lambda f: (f["subject"], f["predicate"], f["object"]))
+    for f in ordered:
+        print("  " + _fact_line(f))
+    return 1
+
+
+_TEMPLATE_FILES = {
+    "README.md": "README.md",
+    "CLAUDE.md": "CLAUDE.md",
+    "mcp.json": ".mcp.json",
+    "gitignore": ".gitignore",
+}
+
+
+def init(target: Path) -> int:
+    """Scaffold a new map repo, ready to git-init and push."""
+    from importlib import resources
+
+    target = Path(target)
+    if target.exists() and any(target.iterdir()):
+        raise SystemExit(f"refusing to init into non-empty directory: {target}")
+    (target / "chart").mkdir(parents=True, exist_ok=True)
+    (target / "chart" / "facts.json").write_text("[]\n")
+    seal(target / "chart")
+    tdir = resources.files("cartographer").joinpath("templates")
+    for src_name, dest_name in _TEMPLATE_FILES.items():
+        (target / dest_name).write_text(tdir.joinpath(src_name).read_text())
+    workflows = target / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "drift-example.yml").write_text(
+        tdir.joinpath("drift-example.yml").read_text()
+    )
+    print(f"initialized map repo at {target}")
+    print("next steps:")
+    print("  1. keep this folder inside your workspace, next to your service checkouts")
+    print("  2. git init && git add -A && git commit -m 'new cartographer map'")
+    print("  3. push it to your org's git host")
+    print(
+        "  4. open Claude Code in this folder; CLAUDE.md explains how facts get added"
+    )
+    return 0
+
+
+def serve(chart: Path, world: Path) -> int:
+    from cartographer.mcp_server import build_server
+
+    build_server(Path(chart), Path(world)).run()
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog="cartographer")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    p_init = sub.add_parser("init", help="scaffold a new map repo")
+    p_init.add_argument("target", help="directory to create")
+
+    p_seal = sub.add_parser("seal", help="recompute the chart manifest")
+    p_seal.add_argument("chart", help="chart directory")
+
+    p_check = sub.add_parser("check", help="verify anchors against the code")
+    p_check.add_argument("chart", help="chart directory")
+    p_check.add_argument("--world", required=True, help="workspace root")
+
+    p_serve = sub.add_parser("serve", help="run the MCP server")
+    p_serve.add_argument("--chart", required=True)
+    p_serve.add_argument("--world", required=True)
+
+    args = ap.parse_args(argv)
+    if args.cmd == "init":
+        return init(Path(args.target))
+    if args.cmd == "seal":
+        print(seal(Path(args.chart)))
+        return 0
+    if args.cmd == "check":
+        return check(Path(args.chart), Path(args.world))
+    return serve(Path(args.chart), Path(args.world))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

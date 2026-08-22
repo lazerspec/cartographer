@@ -1,0 +1,26 @@
+# EXAMPLE ONLY (everything commented out). A scheduled drift check inside
+# your org's CI. To use it you must: (a) rename this file, (b) give the
+# workflow checkout access to every service repo the map covers (deploy
+# keys or an org token), (c) adjust paths and the schedule. The job only
+# REPORTS drift; it never edits the map (humans review, then seal).
+#
+# name: map-drift-check
+# on:
+#   schedule:
+#     - cron: "0 6 * * 1-5"
+#   workflow_dispatch:
+# jobs:
+#   check:
+#     runs-on: ubuntu-latest
+#     steps:
+#       - uses: actions/checkout@v4
+#         with: { path: map }
+#       - uses: actions/checkout@v4
+#         with: { repository: your-org/service-one, path: service-one, token: "${{ secrets.SERVICE_READ_TOKEN }}" }
+#       - uses: actions/checkout@v4
+#         with: { repository: your-org/service-two, path: service-two, token: "${{ secrets.SERVICE_READ_TOKEN }}" }
+#       - uses: actions/setup-python@v5
+#         with: { python-version: "3.12" }
+#       - run: pip install git+https://<your clone of cartographer>
+#       - run: cartographer check map/chart --world .
+#         # nonzero exit fails the job -> your team sees which facts drifted

@@ -1,0 +1,194 @@
+# src/cartographer/anchor.py
+#
+# Source anchors and the deterministic anchor ladder.
+# Pointer + fingerprint, never a copy of source. Stdlib only; no clock —
+# timestamps and revision ids are always passed in.
+import hashlib
+from dataclasses import dataclass
+from dataclasses import field as dc_field
+from pathlib import Path
+
+
+def normalize(text: str) -> str:
+    """Line endings + trailing whitespace only. YAML indentation is
+    semantic, so leading whitespace is untouched (spec §6)."""
+    lines = text.replace("\r\n", "\n").split("\n")
+    out = "\n".join(ln.rstrip() for ln in lines)
+    return out.rstrip("\n")
+
+
+def excerpt_hash(text: str) -> str:
+    return "sha256:" + hashlib.sha256(normalize(text).encode()).hexdigest()
+
+
+def _slice(text: str, lines: tuple[int, int]) -> str:
+    body = normalize(text).split("\n")
+    lo, hi = lines
+    return "\n".join(body[lo - 1 : hi])
+
+
+def make_code_anchor(
+    world: Path, path: str, lines: tuple[int, int] | None, revision: str, at: str
+) -> dict:
+    text = (Path(world) / path).read_text()
+    excerpt = text if lines is None else _slice(text, lines)
+    return {
+        "kind": "code",
+        "path": path,
+        "lines": list(lines) if lines else None,
+        "content_hash": excerpt_hash(excerpt),
+        "revision": revision,
+        "verified_at": at,
+    }
+
+
+def make_external_anchor(world: Path, path: str, revision: str, at: str) -> dict:
+    a = make_code_anchor(world, path, None, revision, at)
+    a["kind"] = "external"
+    a["retrieved_at"] = at
+    return a
+
+
+def verify_anchor(world: Path, anchor: dict) -> bool:
+    p = Path(world) / anchor["path"]
+    if not p.exists():
+        return False
+    text = p.read_text()
+    lines = anchor["lines"]
+    excerpt = text if lines is None else _slice(text, (lines[0], lines[1]))
+    return excerpt_hash(excerpt) == anchor["content_hash"]
+
+
+def identity(fact: dict) -> tuple:
+    return (fact["subject"], fact["predicate"], fact["object"], fact["scope"])
+
+
+@dataclass
+class Disposition:
+    tier: str  # "L1" | "L2" | "L3" | "L4"
+    new_anchor: dict | None = None
+    ambiguous: bool = False
+    # rename-follow found a twin file but could not place the excerpt in it:
+    # the fact's own path is gone from the world, so any widened re-anchor
+    # must be computed against this twin, never the deleted path.
+    relocate_to: str | None = None
+    reasons: list[str] = dc_field(default_factory=list)
+
+
+def _find_excerpt(world: Path, path: str, anchor: dict) -> list[tuple[int, int]]:
+    """All line ranges in `path` whose normalized excerpt hashes to the
+    anchor's content_hash. Whole-file anchors return [] (nowhere to
+    relocate a whole file within itself)."""
+    if anchor["lines"] is None:
+        return []
+    lo, hi = anchor["lines"]
+    span = hi - lo + 1
+    body = normalize((Path(world) / path).read_text()).split("\n")
+    hits: list[tuple[int, int]] = []
+    for start in range(1, len(body) - span + 2):
+        window = "\n".join(body[start - 1 : start - 1 + span])
+        if excerpt_hash(window) == anchor["content_hash"]:
+            hits.append((start, start + span - 1))
+    return hits
+
+
+def _rebump(anchor: dict, revision: str, at: str) -> dict:
+    out = dict(anchor)
+    out["revision"] = revision
+    out["verified_at"] = at
+    return out
+
+
+def _relocated(
+    anchor: dict, path: str, lines: tuple[int, int], revision: str, at: str
+) -> dict:
+    out = _rebump(anchor, revision, at)
+    out["path"] = path
+    out["lines"] = [lines[0], lines[1]]
+    return out
+
+
+def dispose(
+    prev_world: Path,
+    world: Path,
+    fact: dict,
+    changed: set[str],
+    deleted: set[str],
+    created: set[str],
+    revision: str,
+    at: str,
+) -> Disposition:
+    anchor = fact["anchor"]
+    path = anchor["path"]
+
+    if path in deleted:
+        # rename-follow: a created file with an identical whole-file hash
+        old_hash = excerpt_hash((Path(prev_world) / path).read_text())
+        twins = [
+            c
+            for c in sorted(created)
+            if excerpt_hash((Path(world) / c).read_text()) == old_hash
+        ]
+        if len(twins) == 1:
+            twin = twins[0]
+            if anchor["lines"] is None:
+                return Disposition(
+                    "L2",
+                    _relocated_whole(anchor, twin, revision, at),
+                    reasons=[f"file renamed to {twin}"],
+                )
+            hits = _find_excerpt(world, twin, anchor)
+            if len(hits) == 1:
+                return Disposition(
+                    "L2",
+                    _relocated(anchor, twin, hits[0], revision, at),
+                    reasons=[f"file renamed to {twin}"],
+                )
+            return Disposition(
+                "L3",
+                ambiguous=len(hits) > 1,
+                relocate_to=twin,
+                reasons=[f"renamed to {twin} but excerpt not uniquely found"],
+            )
+        return Disposition("L4", reasons=["anchored file deleted, no identical twin"])
+
+    if path not in changed:
+        return Disposition("L1", reasons=["file untouched"])
+
+    if verify_anchor(world, anchor):
+        return Disposition("L1", _rebump(anchor, revision, at), reasons=["hash intact"])
+
+    hits = _find_excerpt(world, path, anchor)
+    if len(hits) == 1:
+        return Disposition(
+            "L2", _relocated(anchor, path, hits[0], revision, at), reasons=["relocated"]
+        )
+    if len(hits) > 1:
+        return Disposition(
+            "L3", ambiguous=True, reasons=[f"excerpt found at {len(hits)} locations"]
+        )
+    return Disposition("L3", reasons=["excerpt no longer present"])
+
+
+def _relocated_whole(anchor: dict, path: str, revision: str, at: str) -> dict:
+    out = _rebump(anchor, revision, at)
+    out["path"] = path
+    return out
+
+
+def run_ladder(
+    prev_world: Path,
+    world: Path,
+    facts: list[dict],
+    changed: set[str],
+    deleted: set[str],
+    created: set[str],
+    revision: str,
+    at: str,
+) -> dict[tuple, Disposition]:
+    return {
+        identity(f): dispose(
+            prev_world, world, f, changed, deleted, created, revision, at
+        )
+        for f in facts
+    }
