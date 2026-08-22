@@ -138,3 +138,62 @@ def test_templates_have_no_em_dashes():
         text = tdir.joinpath(name).read_text().lower()
         for token in banned:
             assert token not in text, f"{token!r} in template {name}"
+
+
+def _git(cwd, *args):
+    import subprocess
+
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
+
+
+def test_pull_map_repo_pulls_new_commit(tmp_path):
+    from cartographer.cli import pull_map_repo
+
+    origin = tmp_path / "origin.git"
+    origin.mkdir()
+    _git(origin, "init", "--bare", "-b", "main")
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    _git(seed, "init", "-b", "main")
+    _git(seed, "config", "user.email", "t@example.com")
+    _git(seed, "config", "user.name", "t")
+    (seed / "chart").mkdir()
+    (seed / "chart" / "facts.json").write_text("[]\n")
+    _git(seed, "add", "-A")
+    _git(seed, "commit", "-m", "one")
+    _git(seed, "remote", "add", "origin", str(origin))
+    _git(seed, "push", "-u", "origin", "main")
+    clone = tmp_path / "clone"
+    _git(tmp_path, "clone", str(origin), "clone")
+    (seed / "chart" / "facts.json").write_text("[]\n\n")
+    _git(seed, "add", "-A")
+    _git(seed, "commit", "-m", "two")
+    _git(seed, "push")
+    assert pull_map_repo(clone / "chart") is True
+    assert (clone / "chart" / "facts.json").read_text() == "[]\n\n"
+
+
+def test_pull_map_repo_fails_soft_without_remote(tmp_path, capsys):
+    from cartographer.cli import pull_map_repo
+
+    repo = tmp_path / "solo"
+    (repo / "chart").mkdir(parents=True)
+    _git(repo, "init", "-b", "main")
+    assert pull_map_repo(repo / "chart") is False
+    assert "serving local copy" in capsys.readouterr().err
+
+
+def test_pull_map_repo_fails_soft_outside_git(tmp_path, capsys):
+    from cartographer.cli import pull_map_repo
+
+    (tmp_path / "chart").mkdir()
+    assert pull_map_repo(tmp_path / "chart") is False
+    assert "serving local copy" in capsys.readouterr().err
+
+
+def test_init_mcp_json_uses_pull():
+    from importlib import resources
+
+    text = resources.files("cartographer").joinpath("templates/mcp.json").read_text()
+    args = json.loads(text)["mcpServers"]["cartographer"]["args"]
+    assert args[:2] == ["serve", "--pull"]

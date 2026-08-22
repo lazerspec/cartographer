@@ -78,7 +78,9 @@ and is refused. The check is read-only and needs no network and no AI.
 
 Claude Code starts the server via the scaffolded `.mcp.json`; nothing to
 run by hand. The agent gets five tools: `chart_index`, `get_scope_facts`,
-`who_mentions`, `staleness_check`, and `get_derived_facts`. Manual start,
+`who_mentions`, `staleness_check`, and `get_derived_facts`. With the
+scaffolded config the server also pulls the map repo's latest commit at
+session start, and serves the local copy if the pull fails. Manual start,
 if you ever need it:
 
     cartographer serve --chart my-map/chart --world .

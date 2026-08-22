@@ -7,6 +7,7 @@ never modifies anything, and nothing here edits facts automatically.
 import argparse
 import hashlib
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -107,9 +108,36 @@ def init(target: Path) -> int:
     return 0
 
 
-def serve(chart: Path, world: Path) -> int:
+def pull_map_repo(chart_dir: Path) -> bool:
+    """Best-effort `git pull --ff-only` in the map repo (the chart dir's
+    parent). Returns True on success. On ANY failure (git missing, not a
+    repo, no remote, offline, non-ff) prints one warning line to stderr
+    ("map pull failed, serving local copy: <first line of error>") and
+    returns False. Never raises."""
+    try:
+        result = subprocess.run(
+            ["git", "pull", "--ff-only", "--quiet"],
+            cwd=Path(chart_dir).resolve().parent,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        if result.returncode == 0:
+            return True
+        error = (result.stderr or result.stdout or "").strip().splitlines()
+        first_line = error[0] if error else "unknown error"
+    except Exception as e:  # noqa: BLE001 - best-effort pull must never raise
+        first_line = str(e).splitlines()[0] if str(e) else repr(e)
+    print(f"map pull failed, serving local copy: {first_line}", file=sys.stderr)
+    return False
+
+
+def serve(chart: Path, world: Path, pull: bool = False) -> int:
     from cartographer.mcp_server import build_server
 
+    if pull:
+        pull_map_repo(Path(chart))
     build_server(Path(chart), Path(world)).run()
     return 0
 
@@ -131,6 +159,7 @@ def main(argv: list[str] | None = None) -> int:
     p_serve = sub.add_parser("serve", help="run the MCP server")
     p_serve.add_argument("--chart", required=True)
     p_serve.add_argument("--world", required=True)
+    p_serve.add_argument("--pull", action="store_true")
 
     args = ap.parse_args(argv)
     if args.cmd == "init":
@@ -140,7 +169,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.cmd == "check":
         return check(Path(args.chart), Path(args.world))
-    return serve(Path(args.chart), Path(args.world))
+    return serve(Path(args.chart), Path(args.world), args.pull)
 
 
 if __name__ == "__main__":

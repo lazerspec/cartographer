@@ -2,7 +2,7 @@
   "mcpServers": {
     "cartographer": {
       "command": "cartographer",
-      "args": ["serve", "--chart", "chart", "--world", ".."]
+      "args": ["serve", "--pull", "--chart", "chart", "--world", ".."]
     }
   }
 }

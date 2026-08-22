@@ -28,7 +28,8 @@ until a human re-confirms it. Facts are never edited automatically.
 
 3. Open Claude Code inside this repo. The `.mcp.json` file starts the map
    server automatically; you get tools like `chart_index` and
-   `get_scope_facts`.
+   `get_scope_facts`. The server pulls this map repo's latest commit at
+   session start when it can; with no network it serves the local copy.
 
 ## Day to day
 
