@@ -73,7 +73,10 @@ tell the expert what you looked for and ask where it lives.
 2. You find the evidence in the code and draft the fact with its anchor.
 3. The expert reviews the draft. Only after their explicit yes do you add
    it to `chart/*.json`.
-4. After a batch is approved: run `cartographer seal chart`, then
+4. When a fact references a service for the first time, make sure
+   sources.json at the repo root has that service's git repo entry; ask
+   the expert for the URL if unsure.
+5. After a batch is approved: run `cartographer seal chart`, then
    `cartographer check chart --world ..` and confirm exit 0. Commit.
 
 ## Hard rules

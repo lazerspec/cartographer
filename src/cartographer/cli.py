@@ -11,7 +11,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from cartographer.anchor import verify_anchor
+from cartographer.anchor import identity
 from cartographer.chart_context import _fact_line
 from cartographer.map_loader import (
     MANIFEST_NAME,
@@ -19,6 +19,7 @@ from cartographer.map_loader import (
     lint_facts,
     load_sealed_chart,
 )
+from cartographer.remote import chart_status, fetch_remote_file
 
 
 def seal(chart_dir: Path) -> str:
@@ -48,9 +49,19 @@ def seal(chart_dir: Path) -> str:
     return f"sealed {chart_dir}: {len(files)} files, {len(facts)} facts"
 
 
-def check(chart_dir: Path, world: Path) -> int:
-    """Verify every fact's anchor against the live code. Read-only.
-    Exit codes: 0 clean, 1 drifted facts need review, 2 chart refused."""
+def _by_fact_order(facts: list[dict]) -> list[dict]:
+    return sorted(facts, key=lambda f: (f["subject"], f["predicate"], f["object"]))
+
+
+def check(
+    chart_dir: Path, world: Path, strict: bool = False, fetch=fetch_remote_file
+) -> int:
+    """Verify every fact's anchor against the live code, or (when the
+    service is not checked out) against the git host via sources.json.
+    Read-only. Exit codes: 0 clean, 1 drifted facts need review (or, with
+    --strict, any unverifiable fact), 2 chart refused."""
+    from cartographer.mcp_server import _split
+
     try:
         facts = load_sealed_chart(Path(chart_dir))
     except LintError as e:
@@ -59,16 +70,30 @@ def check(chart_dir: Path, world: Path) -> int:
             print(f"  {problem}", file=sys.stderr)
         return 2
     world = Path(world)
-    drifted = [f for f in facts if not verify_anchor(world, f["anchor"])]
-    print(f"verified {len(facts) - len(drifted)}/{len(facts)} anchors against {world}")
-    if not drifted:
+    status = chart_status(Path(chart_dir), world, facts, fetch=fetch)
+    drifted, unverifiable = _split(world, status, facts)
+    n_verified = len(facts) - len(drifted) - len(unverifiable)
+    print(f"verified {n_verified}/{len(facts)} anchors against {world}")
+    drifted_facts = [f for f in facts if identity(f) in drifted]
+    unverifiable_facts = [f for f in facts if identity(f) in unverifiable]
+    if not drifted_facts:
         print("0 drifted")
-        return 0
-    print(f"{len(drifted)} DRIFTED (re-confirm each fact, then re-seal):")
-    ordered = sorted(drifted, key=lambda f: (f["subject"], f["predicate"], f["object"]))
-    for f in ordered:
-        print("  " + _fact_line(f))
-    return 1
+    else:
+        print(f"{len(drifted_facts)} DRIFTED (re-confirm each fact, then re-seal):")
+        for f in _by_fact_order(drifted_facts):
+            print("  " + _fact_line(f))
+    if unverifiable_facts:
+        print(
+            f"{len(unverifiable_facts)} UNVERIFIABLE (no local checkout; add the "
+            "service to sources.json or sign in with gh):"
+        )
+        for f in _by_fact_order(unverifiable_facts):
+            print("  " + _fact_line(f))
+    if drifted_facts:
+        return 1
+    if strict and unverifiable_facts:
+        return 1
+    return 0
 
 
 _TEMPLATE_FILES = {
@@ -89,6 +114,7 @@ def init(target: Path) -> int:
     (target / "chart").mkdir(parents=True, exist_ok=True)
     (target / "chart" / "facts.json").write_text("[]\n")
     seal(target / "chart")
+    (target / "sources.json").write_text("{}\n")
     tdir = resources.files("cartographer").joinpath("templates")
     for src_name, dest_name in _TEMPLATE_FILES.items():
         (target / dest_name).write_text(tdir.joinpath(src_name).read_text())
@@ -134,16 +160,22 @@ def pull_map_repo(chart_dir: Path) -> bool:
 
 
 def startup_staleness_notice(chart: Path, world: Path) -> None:
-    """Best-effort: warn on stderr if any fact's anchor has drifted since the
-    map was last verified. Never raises; never writes to stdout."""
+    """Best-effort: warn on stderr if any fact's anchor has drifted, or
+    could not be verified, since the map was last verified. Never raises;
+    never writes to stdout."""
     try:
         from cartographer.map_loader import load_sealed_chart
-        from cartographer.mcp_server import _banner, _drifted_ids
+        from cartographer.mcp_server import _banner, _split, _unverifiable_note
 
-        facts = load_sealed_chart(Path(chart))
-        drifted = _drifted_ids(Path(world), facts)
+        chart_p = Path(chart)
+        world_p = Path(world)
+        facts = load_sealed_chart(chart_p)
+        status = chart_status(chart_p, world_p, facts)
+        drifted, unverifiable = _split(world_p, status, facts)
         if drifted:
             print(_banner(len(drifted), len(facts)), file=sys.stderr)
+        if unverifiable:
+            print(_unverifiable_note(len(unverifiable), len(facts)), file=sys.stderr)
     except Exception as e:  # noqa: BLE001
         print(f"startup staleness check skipped: {e}", file=sys.stderr)
 
@@ -171,6 +203,11 @@ def main(argv: list[str] | None = None) -> int:
     p_check = sub.add_parser("check", help="verify anchors against the code")
     p_check.add_argument("chart", help="chart directory")
     p_check.add_argument("--world", required=True, help="workspace root")
+    p_check.add_argument(
+        "--strict",
+        action="store_true",
+        help="also fail (exit 1) if any fact is unverifiable",
+    )
 
     p_serve = sub.add_parser("serve", help="run the MCP server")
     p_serve.add_argument("--chart", required=True)
@@ -184,7 +221,7 @@ def main(argv: list[str] | None = None) -> int:
         print(seal(Path(args.chart)))
         return 0
     if args.cmd == "check":
-        return check(Path(args.chart), Path(args.world))
+        return check(Path(args.chart), Path(args.world), strict=args.strict)
     return serve(Path(args.chart), Path(args.world), args.pull)
 
 

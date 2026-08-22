@@ -31,6 +31,11 @@ until a human re-confirms it. Facts are never edited automatically.
    `get_scope_facts`. The server pulls this map repo's latest commit at
    session start when it can; with no network it serves the local copy.
 
+4. Fill in sources.json: for every service the map covers, add its git
+   repo ("folder": {"repo": "org/name", "branch": "main"}). This lets the
+   map verify facts straight against the git host when a service is not
+   checked out locally. Requires the GitHub CLI (gh) signed in.
+
 ## Day to day
 
 - After pulling newer service code, run from this repo:

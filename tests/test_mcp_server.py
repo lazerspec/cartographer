@@ -12,11 +12,13 @@ from cartographer.anchor import make_code_anchor
 from cartographer.map_loader import LintError
 from cartographer.mcp_server import (
     STALE_MARK,
+    UNVERIFIED_MARK,
     chart_index,
     get_scope_facts,
     staleness_check,
     who_mentions,
 )
+from cartographer.remote import chart_status
 
 
 def write_manifest(chart_dir: Path) -> None:
@@ -76,7 +78,7 @@ def _mint(tmp_path: Path):
 
 def test_chart_index_scopes_hash_disclaimer(tmp_path):
     chart, world = _mint(tmp_path)
-    out = chart_index(chart, world)
+    out = chart_index(chart, world, {})
     assert "sha256:" in out
     assert "cart: 1 facts, 1 subjects" in out
     assert "order: 1 facts, 1 subjects" in out
@@ -85,17 +87,17 @@ def test_chart_index_scopes_hash_disclaimer(tmp_path):
 
 def test_get_scope_facts_and_unknown_scope(tmp_path):
     chart, world = _mint(tmp_path)
-    out = get_scope_facts(chart, world, "order")
+    out = get_scope_facts(chart, world, {}, "order")
     assert "order.total --[consumed_by]--> billing.invoice" in out
-    miss = get_scope_facts(chart, world, "nope")
+    miss = get_scope_facts(chart, world, {}, "nope")
     assert "known scopes: cart, order" in miss
 
 
 def test_who_mentions_case_insensitive_and_miss(tmp_path):
     chart, world = _mint(tmp_path)
-    assert "cart.amount" in who_mentions(chart, world, "AMOUNT")
-    assert "order.total" in who_mentions(chart, world, "invoice")
-    assert "no fact mentions" in who_mentions(chart, world, "zzqx9")
+    assert "cart.amount" in who_mentions(chart, world, {}, "AMOUNT")
+    assert "order.total" in who_mentions(chart, world, {}, "invoice")
+    assert "no fact mentions" in who_mentions(chart, world, {}, "zzqx9")
 
 
 def test_staleness_clean_drifted_and_scope_filter(tmp_path):
@@ -118,9 +120,9 @@ def test_fail_closed_on_tamper(tmp_path):
     facts[0]["object"] = "tampered"
     p.write_text(json.dumps(facts))
     calls = [
-        lambda: chart_index(chart, world),
-        lambda: get_scope_facts(chart, world, "order"),
-        lambda: who_mentions(chart, world, "amount"),
+        lambda: chart_index(chart, world, {}),
+        lambda: get_scope_facts(chart, world, {}, "order"),
+        lambda: who_mentions(chart, world, {}, "amount"),
         lambda: staleness_check(chart, world),
     ]
     for call in calls:
@@ -179,20 +181,20 @@ def test_default_tools_exclude_derived_tier(tmp_path):
     from cartographer.mcp_server import chart_index, get_scope_facts, who_mentions
 
     d, world = _tiered_chart(tmp_path)
-    assert "1 facts" in chart_index(d, world)
-    scoped = get_scope_facts(d, world, "x")
+    assert "1 facts" in chart_index(d, world, {})
+    scoped = get_scope_facts(d, world, {}, "x")
     assert "drives" in scoped and "carries_field" not in scoped
-    assert "carries_field" not in who_mentions(d, world, "d.f")
+    assert "carries_field" not in who_mentions(d, world, {}, "d.f")
 
 
 def test_get_derived_facts_serves_on_request(tmp_path):
     from cartographer.mcp_server import get_derived_facts
 
     d, world = _tiered_chart(tmp_path)
-    out = get_derived_facts(d, world, "x")
+    out = get_derived_facts(d, world, {}, "x")
     assert out.startswith("DERIVED TIER")
     assert "carries_field" in out and "drives" not in out
-    missing = get_derived_facts(d, world, "nope")
+    missing = get_derived_facts(d, world, {}, "nope")
     assert "no derived facts" in missing
 
 
@@ -217,7 +219,7 @@ def test_untagged_charts_serve_unchanged(tmp_path):
     }
     (d / "x.json").write_text(_json.dumps([fact]))
     write_manifest(d)
-    assert "1 facts" in chart_index(d, world)  # S2: untagged == served
+    assert "1 facts" in chart_index(d, world, {})  # S2: untagged == served
     # S3: staleness covers all facts regardless of tier
     (world / "p.ts").write_text("const a = y.b_v2;\n")
     out = staleness_check(d, world)
@@ -282,7 +284,7 @@ def test_banner_and_mark_when_world_drifts(tmp_path):
     # drift one of the two anchored files
     (world / "svc/a.py").write_text("amount = order.total_v2  # drifted\n")
 
-    out = get_scope_facts(chart, world, "shared")
+    out = get_scope_facts(chart, world, {}, "shared")
     assert out.startswith("WARNING: 1 of")
     lines = out.splitlines()
     order_line = next(ln for ln in lines if "order.total" in ln)
@@ -290,16 +292,86 @@ def test_banner_and_mark_when_world_drifts(tmp_path):
     assert order_line.endswith(STALE_MARK)
     assert not cart_line.endswith(STALE_MARK)
 
-    idx = chart_index(chart, world)
+    idx = chart_index(chart, world, {})
     assert idx.startswith("WARNING: 1 of")
 
 
 def test_no_banner_when_world_clean(tmp_path):
     chart, world = _mint(tmp_path)
-    idx = chart_index(chart, world)
-    scoped = get_scope_facts(chart, world, "order")
+    idx = chart_index(chart, world, {})
+    scoped = get_scope_facts(chart, world, {}, "order")
     assert "WARNING:" not in idx and STALE_MARK not in idx
     assert "WARNING:" not in scoped and STALE_MARK not in scoped
+
+
+def _remote_split_chart(tmp_path):
+    """One fact anchored to a locally checked-out service (svc-a) and one
+    anchored to a service that is not checked out (svc-b), sharing a
+    scope, with a sources.json entry for svc-b so chart_status has
+    somewhere to look."""
+    world = tmp_path / "world"
+    (world / "svc-a").mkdir(parents=True)
+    (world / "svc-a" / "a.py").write_text("amount = order.total\n")
+    origin = tmp_path / "origin"
+    (origin / "svc-b").mkdir(parents=True)
+    original_text = "tax = cart.amount\n"
+    (origin / "svc-b" / "b.py").write_text(original_text)
+
+    chart = tmp_path / "chart"
+    chart.mkdir()
+    f1 = {
+        "subject": "order.total",
+        "predicate": "consumed_by",
+        "object": "billing.invoice",
+        "path": "svc-a/a.py",
+        "scope": "shared",
+        "owner": "t",
+        "anchor": make_code_anchor(
+            world, "svc-a/a.py", (1, 1), "rev-1", "2026-07-11T00:00:00Z"
+        ),
+    }
+    f2 = {
+        "subject": "cart.amount",
+        "predicate": "read_by",
+        "object": "tax.calc",
+        "path": "svc-b/b.py",
+        "scope": "shared",
+        "owner": "t",
+        "anchor": make_code_anchor(
+            origin, "svc-b/b.py", (1, 1), "rev-1", "2026-07-11T00:00:00Z"
+        ),
+    }
+    (chart / "shared.json").write_text(json.dumps([f1, f2]))
+    write_manifest(chart)
+    (chart.parent / "sources.json").write_text(
+        json.dumps({"svc-b": {"repo": "acme/svc-b", "branch": "main"}})
+    )
+    return chart, world, original_text
+
+
+def test_mcp_banner_remote(tmp_path):
+    chart, world, _original_text = _remote_split_chart(tmp_path)
+
+    def fetch_drifted(source, path_in_repo):
+        return "tax = cart.amount_v2  # drifted\n"
+
+    facts = json.loads((chart / "shared.json").read_text())
+    status_drifted = chart_status(chart, world, facts, fetch=fetch_drifted)
+    out = get_scope_facts(chart, world, status_drifted, "shared")
+    assert out.startswith("WARNING")
+    lines = out.splitlines()
+    cart_line = next(ln for ln in lines if "cart.amount" in ln)
+    assert cart_line.endswith(STALE_MARK)
+
+    def fetch_unreachable(source, path_in_repo):
+        return None
+
+    status_unreachable = chart_status(chart, world, facts, fetch=fetch_unreachable)
+    out2 = get_scope_facts(chart, world, status_unreachable, "shared")
+    assert "NOTE:" in out2
+    lines2 = out2.splitlines()
+    cart_line2 = next(ln for ln in lines2 if "cart.amount" in ln)
+    assert cart_line2.endswith(UNVERIFIED_MARK)
 
 
 def test_staleness_check_unchanged_by_feature(tmp_path):

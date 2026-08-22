@@ -15,17 +15,39 @@ from pathlib import Path
 
 from cartographer.anchor import identity, verify_anchor
 from cartographer.chart_context import _fact_line, context_hash, render_core_context
-from cartographer.map_loader import load_sealed_chart
+from cartographer.map_loader import LintError, load_sealed_chart
+from cartographer.remote import DRIFTED, UNVERIFIABLE, chart_status, fetch_remote_file
 
 DISCLAIMER = (
     "The map is sparse and verified: absence of a fact is not evidence of absence."
 )
 
 STALE_MARK = " [STALE? code changed]"
+UNVERIFIED_MARK = " [UNVERIFIED: no local checkout, remote unreachable]"
 
 
-def _drifted_ids(world: Path, facts: list[dict]) -> set[tuple]:
-    return {identity(f) for f in facts if not verify_anchor(world, f["anchor"])}
+def _split(
+    world: Path, status: dict, facts: list[dict]
+) -> tuple[set[tuple], set[tuple]]:
+    """Per served fact: a local checkout re-verifies live (as 0.2.0); with
+    no local checkout, the fact's remote status (from the startup
+    snapshot) decides drifted vs unverifiable."""
+    drifted: set[tuple] = set()
+    unverifiable: set[tuple] = set()
+    for f in facts:
+        anchor = f["anchor"]
+        folder = Path(anchor["path"]).parts[0]
+        fid = identity(f)
+        if (Path(world) / folder).exists():
+            if not verify_anchor(world, anchor):
+                drifted.add(fid)
+        else:
+            s = status.get(fid, UNVERIFIABLE)
+            if s == DRIFTED:
+                drifted.add(fid)
+            elif s == UNVERIFIABLE:
+                unverifiable.add(fid)
+    return drifted, unverifiable
 
 
 def _banner(n_drifted: int, n_total: int) -> str:
@@ -37,13 +59,28 @@ def _banner(n_drifted: int, n_total: int) -> str:
     )
 
 
-def _sorted_lines(facts: list[dict], drifted: set[tuple] | None = None) -> list[str]:
+def _unverifiable_note(n: int, n_total: int) -> str:
+    return (
+        f"NOTE: {n} of {n_total} facts could not be verified (service not "
+        "checked out locally and not reachable remotely). They are served "
+        "as last sealed."
+    )
+
+
+def _sorted_lines(
+    facts: list[dict],
+    drifted: set[tuple] | None = None,
+    unverifiable: set[tuple] | None = None,
+) -> list[str]:
     ordered = sorted(facts, key=lambda f: (f["subject"], f["predicate"], f["object"]))
     lines = []
     for f in ordered:
         line = _fact_line(f)
-        if drifted is not None and identity(f) in drifted:
+        fid = identity(f)
+        if drifted is not None and fid in drifted:
             line += STALE_MARK
+        elif unverifiable is not None and fid in unverifiable:
+            line += UNVERIFIED_MARK
         lines.append(line)
     return lines
 
@@ -54,9 +91,9 @@ def _core(facts: list[dict]) -> list[dict]:
     return [f for f in facts if f.get("tier") != "derived"]
 
 
-def chart_index(chart_dir: Path, world: Path) -> str:
+def chart_index(chart_dir: Path, world: Path, status: dict) -> str:
     facts = _core(load_sealed_chart(chart_dir))
-    drifted = _drifted_ids(world, facts)
+    drifted, unverifiable = _split(world, status, facts)
     by_scope: dict[str, list[dict]] = {}
     for f in facts:
         by_scope.setdefault(f["scope"], []).append(f)
@@ -72,32 +109,38 @@ def chart_index(chart_dir: Path, world: Path) -> str:
             f" — e.g. {', '.join(subjects[:3])}"
         )
     out = "\n".join(lines)
+    if unverifiable:
+        out = _unverifiable_note(len(unverifiable), len(facts)) + "\n" + out
     if drifted:
         out = _banner(len(drifted), len(facts)) + "\n" + out
     return out
 
 
-def get_scope_facts(chart_dir: Path, world: Path, scope: str) -> str:
+def get_scope_facts(chart_dir: Path, world: Path, status: dict, scope: str) -> str:
     facts = _core(load_sealed_chart(chart_dir))
     hits = [f for f in facts if f["scope"] == scope]
     if not hits:
         known = ", ".join(sorted({f["scope"] for f in facts}))
         return f"no facts for scope {scope!r}; known scopes: {known}"
-    drifted = _drifted_ids(world, hits)
-    out = "\n".join(_sorted_lines(hits, drifted))
+    drifted, unverifiable = _split(world, status, hits)
+    out = "\n".join(_sorted_lines(hits, drifted, unverifiable))
+    if unverifiable:
+        out = _unverifiable_note(len(unverifiable), len(hits)) + "\n" + out
     if drifted:
         out = _banner(len(drifted), len(hits)) + "\n" + out
     return out
 
 
-def who_mentions(chart_dir: Path, world: Path, token: str) -> str:
+def who_mentions(chart_dir: Path, world: Path, status: dict, token: str) -> str:
     facts = _core(load_sealed_chart(chart_dir))
     t = token.lower()
     hits = [f for f in facts if t in f["subject"].lower() or t in f["object"].lower()]
     if not hits:
         return f"no fact mentions {token!r} (literal string match over subject/object)"
-    drifted = _drifted_ids(world, hits)
-    out = "\n".join(_sorted_lines(hits, drifted))
+    drifted, unverifiable = _split(world, status, hits)
+    out = "\n".join(_sorted_lines(hits, drifted, unverifiable))
+    if unverifiable:
+        out = _unverifiable_note(len(unverifiable), len(hits)) + "\n" + out
     if drifted:
         out = _banner(len(drifted), len(hits)) + "\n" + out
     return out
@@ -106,14 +149,16 @@ def who_mentions(chart_dir: Path, world: Path, token: str) -> str:
 DERIVED_CAVEAT = "DERIVED TIER (statically re-derivable; served on request only)"
 
 
-def get_derived_facts(chart_dir: Path, world: Path, scope: str) -> str:
+def get_derived_facts(chart_dir: Path, world: Path, status: dict, scope: str) -> str:
     facts = [f for f in load_sealed_chart(chart_dir) if f.get("tier") == "derived"]
     hits = [f for f in facts if f["scope"] == scope]
     if not hits:
         known = ", ".join(sorted({f["scope"] for f in facts})) or "(none)"
         return f"no derived facts for scope {scope!r}; scopes with derived: {known}"
-    drifted = _drifted_ids(world, hits)
-    out = DERIVED_CAVEAT + "\n" + "\n".join(_sorted_lines(hits, drifted))
+    drifted, unverifiable = _split(world, status, hits)
+    out = DERIVED_CAVEAT + "\n" + "\n".join(_sorted_lines(hits, drifted, unverifiable))
+    if unverifiable:
+        out = _unverifiable_note(len(unverifiable), len(hits)) + "\n" + out
     if drifted:
         out = _banner(len(drifted), len(hits)) + "\n" + out
     return out
@@ -130,8 +175,15 @@ def staleness_check(chart_dir: Path, world: Path, scope: str | None = None) -> s
     return head + f"; {len(drifted)} DRIFTED:\n" + "\n".join(_sorted_lines(drifted))
 
 
-def build_server(chart_dir: Path, world: Path):
+def build_server(chart_dir: Path, world: Path, fetch=fetch_remote_file):
     from mcp.server.fastmcp import FastMCP
+
+    try:
+        status = chart_status(
+            chart_dir, world, load_sealed_chart(chart_dir), fetch=fetch
+        )
+    except LintError:
+        status = {}
 
     app = FastMCP("cartographer")
 
@@ -144,7 +196,7 @@ def build_server(chart_dir: Path, world: Path):
         ),
     )
     def _index() -> str:
-        return chart_index(chart_dir, world)
+        return chart_index(chart_dir, world, status)
 
     @app.tool(
         name="get_scope_facts",
@@ -155,7 +207,7 @@ def build_server(chart_dir: Path, world: Path):
         ),
     )
     def _scope(scope: str) -> str:
-        return get_scope_facts(chart_dir, world, scope)
+        return get_scope_facts(chart_dir, world, status, scope)
 
     @app.tool(
         name="who_mentions",
@@ -166,7 +218,7 @@ def build_server(chart_dir: Path, world: Path):
         ),
     )
     def _mentions(token: str) -> str:
-        return who_mentions(chart_dir, world, token)
+        return who_mentions(chart_dir, world, status, token)
 
     @app.tool(
         name="staleness_check",
@@ -187,7 +239,7 @@ def build_server(chart_dir: Path, world: Path):
         ),
     )
     def _derived(scope: str) -> str:
-        return get_derived_facts(chart_dir, world, scope)
+        return get_derived_facts(chart_dir, world, status, scope)
 
     return app
 

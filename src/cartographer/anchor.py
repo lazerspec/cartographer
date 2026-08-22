@@ -49,14 +49,17 @@ def make_external_anchor(world: Path, path: str, revision: str, at: str) -> dict
     return a
 
 
+def verify_excerpt(text: str, anchor: dict) -> bool:
+    lines = anchor["lines"]
+    excerpt = text if lines is None else _slice(text, (lines[0], lines[1]))
+    return excerpt_hash(excerpt) == anchor["content_hash"]
+
+
 def verify_anchor(world: Path, anchor: dict) -> bool:
     p = Path(world) / anchor["path"]
     if not p.exists():
         return False
-    text = p.read_text()
-    lines = anchor["lines"]
-    excerpt = text if lines is None else _slice(text, (lines[0], lines[1]))
-    return excerpt_hash(excerpt) == anchor["content_hash"]
+    return verify_excerpt(p.read_text(), anchor)
 
 
 def identity(fact: dict) -> tuple:

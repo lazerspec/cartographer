@@ -74,6 +74,12 @@ listed facts point at code that changed; review each one, re-anchor or
 correct it, then seal again. Exit 2: the chart itself fails verification
 and is refused. The check is read-only and needs no network and no AI.
 
+Services you do not have checked out are verified straight against the git
+host: list each service's repo in the map's sources.json and sign in with
+the GitHub CLI. Only a change to the exact pinned lines raises a flag.
+Facts that cannot be verified either way are reported as unverifiable,
+never silently passed.
+
 ### Serve
 
 Claude Code starts the server via the scaffolded `.mcp.json`; nothing to

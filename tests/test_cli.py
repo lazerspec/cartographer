@@ -101,6 +101,7 @@ def test_init_scaffold(tmp_path):
     for rel in [
         "chart/facts.json",
         "chart/chart.manifest",
+        "sources.json",
         "CLAUDE.md",
         "README.md",
         ".mcp.json",
@@ -208,6 +209,57 @@ def test_serve_startup_notice_on_stderr(tmp_path, capsys):
 
     startup_staleness_notice(tmp_path / "nope", world)
     assert "startup staleness check skipped" in capsys.readouterr().err
+
+
+def _write_remote_chart(tmp_path: Path):
+    """A map with one locally-checked-out service (svc-a) and one that is
+    not (svc-b); svc-b's original file text is captured before the local
+    copy is removed, so a fake fetch can return it (or a modified version)
+    without any network."""
+    world = write_world(tmp_path)
+    chart = write_chart(tmp_path, world)
+    seal(chart)
+    original_text = (world / "svc-b" / "src" / "consume.py").read_text()
+    import shutil
+
+    shutil.rmtree(world / "svc-b")
+    map_root = chart.parent
+    (map_root / "sources.json").write_text(
+        json.dumps({"svc-b": {"repo": "acme/svc-b", "branch": "main"}})
+    )
+    return chart, world, original_text
+
+
+def test_check_exit_codes_remote(tmp_path, capsys):
+    chart, world, original_text = _write_remote_chart(tmp_path)
+
+    def fetch_clean(source, path_in_repo):
+        return original_text
+
+    assert check(chart, world, fetch=fetch_clean) == 0
+
+    def fetch_drifted(source, path_in_repo):
+        return "def consume():\n    handle('EventB')\n    return True\n"
+
+    assert check(chart, world, fetch=fetch_drifted) == 1
+    out = capsys.readouterr().out
+    assert "svc-b" in out and "DRIFTED" in out
+
+
+def test_check_exit_codes_unverifiable(tmp_path, capsys):
+    chart, world, _original_text = _write_remote_chart(tmp_path)
+    # remove the sources.json entry entirely: svc-b becomes unverifiable
+    map_root = chart.parent
+    (map_root / "sources.json").write_text("{}\n")
+
+    def fetch_never(source, path_in_repo):
+        raise AssertionError("fetch should not be called: no sources entry")
+
+    assert check(chart, world, strict=False, fetch=fetch_never) == 0
+    out = capsys.readouterr().out
+    assert "UNVERIFIABLE" in out
+
+    assert check(chart, world, strict=True, fetch=fetch_never) == 1
 
 
 def test_init_mcp_json_uses_pull():
