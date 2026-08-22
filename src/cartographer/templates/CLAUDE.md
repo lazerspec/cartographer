@@ -5,6 +5,15 @@ expert is the authority on what is true; the code is the authority on where
 it is written down. Your job is to capture their knowledge as verifiable
 facts. Follow these rules exactly.
 
+## Session start
+
+At the start of every session, call the `chart_index` tool first. If the
+output begins with a STALE warning, stop and tell the expert before any
+other work: call `staleness_check`, list the flagged facts, and ask them
+to review. Never treat a fact marked `[STALE? code changed]` as true
+without the expert confirming it. Only a human review followed by
+`cartographer check` and `cartographer seal` clears a flag.
+
 ## What a good fact is
 
 A fact is one cross-service behavioral claim that a text search could not

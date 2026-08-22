@@ -44,4 +44,8 @@ until a human re-confirms it. Facts are never edited automatically.
 - To add or change facts, work with Claude Code in this repo; `CLAUDE.md`
   holds the curation rules. A human reviews every fact before it is sealed.
 
+- If the map tools show a STALE warning, the code moved underneath the
+  map. Run `cartographer check chart --world ..`, review each flagged
+  fact, then seal and push so everyone gets the refreshed map.
+
 The map is sparse and verified: absence of a fact is not evidence of absence.

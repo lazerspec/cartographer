@@ -1,6 +1,6 @@
 [project]
 name = "cartographer"
-version = "0.1.0"
+version = "0.2.0"
 description = "Curated, source-anchored maps of cross-service behavior, served to coding agents over MCP."
 readme = "README.md"
 license = { file = "LICENSE" }

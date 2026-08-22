@@ -11,6 +11,7 @@ import pytest
 from cartographer.anchor import make_code_anchor
 from cartographer.map_loader import LintError
 from cartographer.mcp_server import (
+    STALE_MARK,
     chart_index,
     get_scope_facts,
     staleness_check,
@@ -74,8 +75,8 @@ def _mint(tmp_path: Path):
 
 
 def test_chart_index_scopes_hash_disclaimer(tmp_path):
-    chart, _ = _mint(tmp_path)
-    out = chart_index(chart)
+    chart, world = _mint(tmp_path)
+    out = chart_index(chart, world)
     assert "sha256:" in out
     assert "cart: 1 facts, 1 subjects" in out
     assert "order: 1 facts, 1 subjects" in out
@@ -83,18 +84,18 @@ def test_chart_index_scopes_hash_disclaimer(tmp_path):
 
 
 def test_get_scope_facts_and_unknown_scope(tmp_path):
-    chart, _ = _mint(tmp_path)
-    out = get_scope_facts(chart, "order")
+    chart, world = _mint(tmp_path)
+    out = get_scope_facts(chart, world, "order")
     assert "order.total --[consumed_by]--> billing.invoice" in out
-    miss = get_scope_facts(chart, "nope")
+    miss = get_scope_facts(chart, world, "nope")
     assert "known scopes: cart, order" in miss
 
 
 def test_who_mentions_case_insensitive_and_miss(tmp_path):
-    chart, _ = _mint(tmp_path)
-    assert "cart.amount" in who_mentions(chart, "AMOUNT")
-    assert "order.total" in who_mentions(chart, "invoice")
-    assert "no fact mentions" in who_mentions(chart, "zzqx9")
+    chart, world = _mint(tmp_path)
+    assert "cart.amount" in who_mentions(chart, world, "AMOUNT")
+    assert "order.total" in who_mentions(chart, world, "invoice")
+    assert "no fact mentions" in who_mentions(chart, world, "zzqx9")
 
 
 def test_staleness_clean_drifted_and_scope_filter(tmp_path):
@@ -117,9 +118,9 @@ def test_fail_closed_on_tamper(tmp_path):
     facts[0]["object"] = "tampered"
     p.write_text(json.dumps(facts))
     calls = [
-        lambda: chart_index(chart),
-        lambda: get_scope_facts(chart, "order"),
-        lambda: who_mentions(chart, "amount"),
+        lambda: chart_index(chart, world),
+        lambda: get_scope_facts(chart, world, "order"),
+        lambda: who_mentions(chart, world, "amount"),
         lambda: staleness_check(chart, world),
     ]
     for call in calls:
@@ -151,8 +152,12 @@ def test_shell_registers_exactly_five_tools(tmp_path):
 def _tiered_chart(tmp_path):
     import json as _json
 
+    world = tmp_path / "tiered_world"
+    world.mkdir()
+    (world / "p.ts").write_text("const a = y.b;\n")
     d = tmp_path / "v4"
     d.mkdir()
+    anchor = make_code_anchor(world, "p.ts", (1, 1), "r", "t")
     core = {
         "subject": "a",
         "predicate": "drives",
@@ -160,41 +165,34 @@ def _tiered_chart(tmp_path):
         "path": "p.ts",
         "scope": "x",
         "owner": "c",
-        "anchor": {
-            "kind": "code",
-            "path": "p.ts",
-            "lines": [1, 1],
-            "content_hash": "sha256:0",
-            "revision": "r",
-            "verified_at": "t",
-        },
+        "anchor": anchor,
         "tier": "core",
     }
     derived = dict(core, subject="d", predicate="carries_field", object="x.d.f")
     derived["tier"] = "derived"
     (d / "x.json").write_text(_json.dumps([core, derived]))
     write_manifest(d)
-    return d
+    return d, world
 
 
 def test_default_tools_exclude_derived_tier(tmp_path):
     from cartographer.mcp_server import chart_index, get_scope_facts, who_mentions
 
-    d = _tiered_chart(tmp_path)
-    assert "1 facts" in chart_index(d)
-    scoped = get_scope_facts(d, "x")
+    d, world = _tiered_chart(tmp_path)
+    assert "1 facts" in chart_index(d, world)
+    scoped = get_scope_facts(d, world, "x")
     assert "drives" in scoped and "carries_field" not in scoped
-    assert "carries_field" not in who_mentions(d, "d.f")
+    assert "carries_field" not in who_mentions(d, world, "d.f")
 
 
 def test_get_derived_facts_serves_on_request(tmp_path):
     from cartographer.mcp_server import get_derived_facts
 
-    d = _tiered_chart(tmp_path)
-    out = get_derived_facts(d, "x")
+    d, world = _tiered_chart(tmp_path)
+    out = get_derived_facts(d, world, "x")
     assert out.startswith("DERIVED TIER")
     assert "carries_field" in out and "drives" not in out
-    missing = get_derived_facts(d, "nope")
+    missing = get_derived_facts(d, world, "nope")
     assert "no derived facts" in missing
 
 
@@ -203,6 +201,9 @@ def test_untagged_charts_serve_unchanged(tmp_path):
 
     from cartographer.mcp_server import chart_index, staleness_check
 
+    world = tmp_path / "w"
+    world.mkdir()
+    (world / "p.ts").write_text("const a = y.b;\n")
     d = tmp_path / "v0"
     d.mkdir()
     fact = {
@@ -212,21 +213,13 @@ def test_untagged_charts_serve_unchanged(tmp_path):
         "path": "p.ts",
         "scope": "x",
         "owner": "c",
-        "anchor": {
-            "kind": "code",
-            "path": "p.ts",
-            "lines": [1, 1],
-            "content_hash": "sha256:0",
-            "revision": "r",
-            "verified_at": "t",
-        },
+        "anchor": make_code_anchor(world, "p.ts", (1, 1), "r", "t"),
     }
     (d / "x.json").write_text(_json.dumps([fact]))
     write_manifest(d)
-    assert "1 facts" in chart_index(d)  # S2: untagged == served
+    assert "1 facts" in chart_index(d, world)  # S2: untagged == served
     # S3: staleness covers all facts regardless of tier
-    world = tmp_path / "w"
-    world.mkdir()
+    (world / "p.ts").write_text("const a = y.b_v2;\n")
     out = staleness_check(d, world)
     assert "1 DRIFTED" in out
 
@@ -234,7 +227,7 @@ def test_untagged_charts_serve_unchanged(tmp_path):
 def test_staleness_covers_both_tiers(tmp_path):
     from cartographer.mcp_server import staleness_check
 
-    d = _tiered_chart(tmp_path)
+    d, _world = _tiered_chart(tmp_path)
     world = tmp_path / "w"
     world.mkdir()
     out = staleness_check(d, world)
@@ -244,8 +237,72 @@ def test_staleness_covers_both_tiers(tmp_path):
 def test_render_core_context_filters_derived(tmp_path):
     from cartographer.chart_context import render_chart_context, render_core_context
 
-    d = _tiered_chart(tmp_path)
+    d, _world = _tiered_chart(tmp_path)
     full = render_chart_context(d)
     core = render_core_context(d)
     assert "carries_field" in full and "carries_field" not in core
     assert "drives" in core
+
+
+# --- stale-aware serving (contract amendment 2026-08-21) -------------------
+
+
+def test_banner_and_mark_when_world_drifts(tmp_path):
+    world = tmp_path / "world"
+    (world / "svc").mkdir(parents=True)
+    (world / "svc/a.py").write_text("amount = order.total\n")
+    (world / "svc/b.py").write_text("tax = cart.amount\n")
+    chart = tmp_path / "chart"
+    chart.mkdir()
+    f1 = {
+        "subject": "order.total",
+        "predicate": "consumed_by",
+        "object": "billing.invoice",
+        "path": "svc/a.py",
+        "scope": "shared",
+        "owner": "t",
+        "anchor": make_code_anchor(
+            world, "svc/a.py", (1, 1), "rev-1", "2026-07-11T00:00:00Z"
+        ),
+    }
+    f2 = {
+        "subject": "cart.amount",
+        "predicate": "read_by",
+        "object": "tax.calc",
+        "path": "svc/b.py",
+        "scope": "shared",
+        "owner": "t",
+        "anchor": make_code_anchor(
+            world, "svc/b.py", (1, 1), "rev-1", "2026-07-11T00:00:00Z"
+        ),
+    }
+    (chart / "shared.json").write_text(json.dumps([f1, f2]))
+    write_manifest(chart)
+
+    # drift one of the two anchored files
+    (world / "svc/a.py").write_text("amount = order.total_v2  # drifted\n")
+
+    out = get_scope_facts(chart, world, "shared")
+    assert out.startswith("WARNING: 1 of")
+    lines = out.splitlines()
+    order_line = next(ln for ln in lines if "order.total" in ln)
+    cart_line = next(ln for ln in lines if "cart.amount" in ln)
+    assert order_line.endswith(STALE_MARK)
+    assert not cart_line.endswith(STALE_MARK)
+
+    idx = chart_index(chart, world)
+    assert idx.startswith("WARNING: 1 of")
+
+
+def test_no_banner_when_world_clean(tmp_path):
+    chart, world = _mint(tmp_path)
+    idx = chart_index(chart, world)
+    scoped = get_scope_facts(chart, world, "order")
+    assert "WARNING:" not in idx and STALE_MARK not in idx
+    assert "WARNING:" not in scoped and STALE_MARK not in scoped
+
+
+def test_staleness_check_unchanged_by_feature(tmp_path):
+    chart, world = _mint(tmp_path)
+    out = staleness_check(chart, world)
+    assert out.startswith("verified ")

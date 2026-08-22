@@ -13,7 +13,7 @@ Derived-tier facts serve only via get_derived_facts.
 import argparse
 from pathlib import Path
 
-from cartographer.anchor import verify_anchor
+from cartographer.anchor import identity, verify_anchor
 from cartographer.chart_context import _fact_line, context_hash, render_core_context
 from cartographer.map_loader import load_sealed_chart
 
@@ -21,10 +21,31 @@ DISCLAIMER = (
     "The map is sparse and verified: absence of a fact is not evidence of absence."
 )
 
+STALE_MARK = " [STALE? code changed]"
 
-def _sorted_lines(facts: list[dict]) -> list[str]:
+
+def _drifted_ids(world: Path, facts: list[dict]) -> set[tuple]:
+    return {identity(f) for f in facts if not verify_anchor(world, f["anchor"])}
+
+
+def _banner(n_drifted: int, n_total: int) -> str:
+    return (
+        f"WARNING: {n_drifted} of {n_total} facts point at code that has "
+        "changed since the map was last verified. Treat marked facts as "
+        "possibly stale. A human must run 'cartographer check' and review "
+        "before these facts are trusted."
+    )
+
+
+def _sorted_lines(facts: list[dict], drifted: set[tuple] | None = None) -> list[str]:
     ordered = sorted(facts, key=lambda f: (f["subject"], f["predicate"], f["object"]))
-    return [_fact_line(f) for f in ordered]
+    lines = []
+    for f in ordered:
+        line = _fact_line(f)
+        if drifted is not None and identity(f) in drifted:
+            line += STALE_MARK
+        lines.append(line)
+    return lines
 
 
 def _core(facts: list[dict]) -> list[dict]:
@@ -33,8 +54,9 @@ def _core(facts: list[dict]) -> list[dict]:
     return [f for f in facts if f.get("tier") != "derived"]
 
 
-def chart_index(chart_dir: Path) -> str:
+def chart_index(chart_dir: Path, world: Path) -> str:
     facts = _core(load_sealed_chart(chart_dir))
+    drifted = _drifted_ids(world, facts)
     by_scope: dict[str, list[dict]] = {}
     for f in facts:
         by_scope.setdefault(f["scope"], []).append(f)
@@ -49,37 +71,52 @@ def chart_index(chart_dir: Path) -> str:
             f"{scope}: {len(by_scope[scope])} facts, {len(subjects)} subjects"
             f" — e.g. {', '.join(subjects[:3])}"
         )
-    return "\n".join(lines)
+    out = "\n".join(lines)
+    if drifted:
+        out = _banner(len(drifted), len(facts)) + "\n" + out
+    return out
 
 
-def get_scope_facts(chart_dir: Path, scope: str) -> str:
+def get_scope_facts(chart_dir: Path, world: Path, scope: str) -> str:
     facts = _core(load_sealed_chart(chart_dir))
     hits = [f for f in facts if f["scope"] == scope]
     if not hits:
         known = ", ".join(sorted({f["scope"] for f in facts}))
         return f"no facts for scope {scope!r}; known scopes: {known}"
-    return "\n".join(_sorted_lines(hits))
+    drifted = _drifted_ids(world, hits)
+    out = "\n".join(_sorted_lines(hits, drifted))
+    if drifted:
+        out = _banner(len(drifted), len(hits)) + "\n" + out
+    return out
 
 
-def who_mentions(chart_dir: Path, token: str) -> str:
+def who_mentions(chart_dir: Path, world: Path, token: str) -> str:
     facts = _core(load_sealed_chart(chart_dir))
     t = token.lower()
     hits = [f for f in facts if t in f["subject"].lower() or t in f["object"].lower()]
     if not hits:
         return f"no fact mentions {token!r} (literal string match over subject/object)"
-    return "\n".join(_sorted_lines(hits))
+    drifted = _drifted_ids(world, hits)
+    out = "\n".join(_sorted_lines(hits, drifted))
+    if drifted:
+        out = _banner(len(drifted), len(hits)) + "\n" + out
+    return out
 
 
 DERIVED_CAVEAT = "DERIVED TIER (statically re-derivable; served on request only)"
 
 
-def get_derived_facts(chart_dir: Path, scope: str) -> str:
+def get_derived_facts(chart_dir: Path, world: Path, scope: str) -> str:
     facts = [f for f in load_sealed_chart(chart_dir) if f.get("tier") == "derived"]
     hits = [f for f in facts if f["scope"] == scope]
     if not hits:
         known = ", ".join(sorted({f["scope"] for f in facts})) or "(none)"
         return f"no derived facts for scope {scope!r}; scopes with derived: {known}"
-    return DERIVED_CAVEAT + "\n" + "\n".join(_sorted_lines(hits))
+    drifted = _drifted_ids(world, hits)
+    out = DERIVED_CAVEAT + "\n" + "\n".join(_sorted_lines(hits, drifted))
+    if drifted:
+        out = _banner(len(drifted), len(hits)) + "\n" + out
+    return out
 
 
 def staleness_check(chart_dir: Path, world: Path, scope: str | None = None) -> str:
@@ -107,7 +144,7 @@ def build_server(chart_dir: Path, world: Path):
         ),
     )
     def _index() -> str:
-        return chart_index(chart_dir)
+        return chart_index(chart_dir, world)
 
     @app.tool(
         name="get_scope_facts",
@@ -118,7 +155,7 @@ def build_server(chart_dir: Path, world: Path):
         ),
     )
     def _scope(scope: str) -> str:
-        return get_scope_facts(chart_dir, scope)
+        return get_scope_facts(chart_dir, world, scope)
 
     @app.tool(
         name="who_mentions",
@@ -129,7 +166,7 @@ def build_server(chart_dir: Path, world: Path):
         ),
     )
     def _mentions(token: str) -> str:
-        return who_mentions(chart_dir, token)
+        return who_mentions(chart_dir, world, token)
 
     @app.tool(
         name="staleness_check",
@@ -150,7 +187,7 @@ def build_server(chart_dir: Path, world: Path):
         ),
     )
     def _derived(scope: str) -> str:
-        return get_derived_facts(chart_dir, scope)
+        return get_derived_facts(chart_dir, world, scope)
 
     return app
 

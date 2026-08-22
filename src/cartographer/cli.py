@@ -133,11 +133,27 @@ def pull_map_repo(chart_dir: Path) -> bool:
     return False
 
 
+def startup_staleness_notice(chart: Path, world: Path) -> None:
+    """Best-effort: warn on stderr if any fact's anchor has drifted since the
+    map was last verified. Never raises; never writes to stdout."""
+    try:
+        from cartographer.map_loader import load_sealed_chart
+        from cartographer.mcp_server import _banner, _drifted_ids
+
+        facts = load_sealed_chart(Path(chart))
+        drifted = _drifted_ids(Path(world), facts)
+        if drifted:
+            print(_banner(len(drifted), len(facts)), file=sys.stderr)
+    except Exception as e:  # noqa: BLE001
+        print(f"startup staleness check skipped: {e}", file=sys.stderr)
+
+
 def serve(chart: Path, world: Path, pull: bool = False) -> int:
     from cartographer.mcp_server import build_server
 
     if pull:
         pull_map_repo(Path(chart))
+    startup_staleness_notice(Path(chart), Path(world))
     build_server(Path(chart), Path(world)).run()
     return 0
 

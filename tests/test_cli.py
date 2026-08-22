@@ -191,6 +191,25 @@ def test_pull_map_repo_fails_soft_outside_git(tmp_path, capsys):
     assert "serving local copy" in capsys.readouterr().err
 
 
+def test_serve_startup_notice_on_stderr(tmp_path, capsys):
+    from cartographer.cli import startup_staleness_notice
+
+    world = write_world(tmp_path)
+    chart = write_chart(tmp_path, world)
+    seal(chart)
+
+    startup_staleness_notice(chart, world)
+    assert capsys.readouterr().err == ""
+
+    target = world / "svc-b" / "src" / "consume.py"
+    target.write_text("def consume():\n    handle('EventB')\n    return True\n")
+    startup_staleness_notice(chart, world)
+    assert "WARNING: 1 of 2" in capsys.readouterr().err
+
+    startup_staleness_notice(tmp_path / "nope", world)
+    assert "startup staleness check skipped" in capsys.readouterr().err
+
+
 def test_init_mcp_json_uses_pull():
     from importlib import resources
 
