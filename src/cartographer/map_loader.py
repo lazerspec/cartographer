@@ -33,7 +33,7 @@ def lint_facts(facts: list[dict]) -> list[str]:
     for f in facts:
         for p in {f["path"], (f.get("anchor") or {}).get("path") or f["path"]}:
             parts = Path(p).parts
-            if Path(p).is_absolute() or ".." in parts:
+            if not parts or Path(p).is_absolute() or ".." in parts:
                 problems.append(f"unsafe path {p!r} (absolute or ..): {f['subject']}")
 
     seen: dict[tuple, str] = {}

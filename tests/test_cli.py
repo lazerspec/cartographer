@@ -262,6 +262,30 @@ def test_check_exit_codes_unverifiable(tmp_path, capsys):
     assert check(chart, world, strict=True, fetch=fetch_never) == 1
 
 
+def test_check_counts_facts_not_anchor_keys(tmp_path, capsys):
+    """Two facts sharing one anchor, both drifted: `check` must print
+    'verified 0/2' and '2 DRIFTED', not 'verified 1/2' / '1 DRIFTED'."""
+    world = write_world(tmp_path)
+    anchor_fact = fact(world, "svc-a", "emits_event", "EventA", "svc-a/src/publish.py")
+    shared_anchor = dict(anchor_fact["anchor"])
+    f1 = dict(anchor_fact)
+    f2 = dict(
+        anchor_fact, predicate="writes_table", object="tbl_a", anchor=shared_anchor
+    )
+    chart = tmp_path / "map" / "chart"
+    chart.mkdir(parents=True)
+    (chart / "flow.json").write_text(json.dumps([f1, f2], indent=1))
+    seal(chart)
+
+    target = world / "svc-a" / "src" / "publish.py"
+    target.write_text("def publish():\n    emit('EventB')\n    return True\n")
+
+    assert check(chart, world) == 1
+    out = capsys.readouterr().out
+    assert "verified 0/2" in out
+    assert "2 DRIFTED" in out
+
+
 def test_init_mcp_json_uses_pull():
     from importlib import resources
 

@@ -75,6 +75,16 @@ def _unverifiable_note(n: int, n_total: int) -> str:
     )
 
 
+def _fact_counts(
+    facts: list[dict], drifted: set[tuple], unverifiable: set[tuple]
+) -> tuple[int, int]:
+    """Counts of FACTS (not distinct anchor keys) whose anchor_key falls in
+    each set — two facts sharing one anchor must both count."""
+    n_drifted = sum(1 for f in facts if anchor_key(f) in drifted)
+    n_unverifiable = sum(1 for f in facts if anchor_key(f) in unverifiable)
+    return n_drifted, n_unverifiable
+
+
 def _sorted_lines(
     facts: list[dict],
     drifted: set[tuple] | None = None,
@@ -116,11 +126,12 @@ def chart_index(chart_dir: Path, world: Path, status: dict) -> str:
             f"{scope}: {len(by_scope[scope])} facts, {len(subjects)} subjects"
             f" — e.g. {', '.join(subjects[:3])}"
         )
+    n_drifted, n_unverifiable = _fact_counts(facts, drifted, unverifiable)
     out = "\n".join(lines)
-    if unverifiable:
-        out = _unverifiable_note(len(unverifiable), len(facts)) + "\n" + out
-    if drifted:
-        out = _banner(len(drifted), len(facts)) + "\n" + out
+    if n_unverifiable:
+        out = _unverifiable_note(n_unverifiable, len(facts)) + "\n" + out
+    if n_drifted:
+        out = _banner(n_drifted, len(facts)) + "\n" + out
     return out
 
 
@@ -131,11 +142,12 @@ def get_scope_facts(chart_dir: Path, world: Path, status: dict, scope: str) -> s
         known = ", ".join(sorted({f["scope"] for f in facts}))
         return f"no facts for scope {scope!r}; known scopes: {known}"
     drifted, unverifiable = _split(world, status, hits)
+    n_drifted, n_unverifiable = _fact_counts(hits, drifted, unverifiable)
     out = "\n".join(_sorted_lines(hits, drifted, unverifiable))
-    if unverifiable:
-        out = _unverifiable_note(len(unverifiable), len(hits)) + "\n" + out
-    if drifted:
-        out = _banner(len(drifted), len(hits)) + "\n" + out
+    if n_unverifiable:
+        out = _unverifiable_note(n_unverifiable, len(hits)) + "\n" + out
+    if n_drifted:
+        out = _banner(n_drifted, len(hits)) + "\n" + out
     return out
 
 
@@ -146,11 +158,12 @@ def who_mentions(chart_dir: Path, world: Path, status: dict, token: str) -> str:
     if not hits:
         return f"no fact mentions {token!r} (literal string match over subject/object)"
     drifted, unverifiable = _split(world, status, hits)
+    n_drifted, n_unverifiable = _fact_counts(hits, drifted, unverifiable)
     out = "\n".join(_sorted_lines(hits, drifted, unverifiable))
-    if unverifiable:
-        out = _unverifiable_note(len(unverifiable), len(hits)) + "\n" + out
-    if drifted:
-        out = _banner(len(drifted), len(hits)) + "\n" + out
+    if n_unverifiable:
+        out = _unverifiable_note(n_unverifiable, len(hits)) + "\n" + out
+    if n_drifted:
+        out = _banner(n_drifted, len(hits)) + "\n" + out
     return out
 
 
@@ -164,23 +177,43 @@ def get_derived_facts(chart_dir: Path, world: Path, status: dict, scope: str) ->
         known = ", ".join(sorted({f["scope"] for f in facts})) or "(none)"
         return f"no derived facts for scope {scope!r}; scopes with derived: {known}"
     drifted, unverifiable = _split(world, status, hits)
+    n_drifted, n_unverifiable = _fact_counts(hits, drifted, unverifiable)
     out = DERIVED_CAVEAT + "\n" + "\n".join(_sorted_lines(hits, drifted, unverifiable))
-    if unverifiable:
-        out = _unverifiable_note(len(unverifiable), len(hits)) + "\n" + out
-    if drifted:
-        out = _banner(len(drifted), len(hits)) + "\n" + out
+    if n_unverifiable:
+        out = _unverifiable_note(n_unverifiable, len(hits)) + "\n" + out
+    if n_drifted:
+        out = _banner(n_drifted, len(hits)) + "\n" + out
     return out
 
 
-def staleness_check(chart_dir: Path, world: Path, scope: str | None = None) -> str:
+def staleness_check(
+    chart_dir: Path, world: Path, status: dict, scope: str | None = None
+) -> str:
+    """Three-state, consistent with the serving tools: a local file
+    re-verifies live; with no local file, the startup snapshot decides
+    drifted vs unverifiable (via _split)."""
     facts = load_sealed_chart(chart_dir)
     if scope is not None:
         facts = [f for f in facts if f["scope"] == scope]
-    drifted = [f for f in facts if not verify_anchor(world, f["anchor"])]
-    head = f"verified {len(facts) - len(drifted)}/{len(facts)} anchors against {world}"
-    if not drifted:
-        return head + "; 0 drifted"
-    return head + f"; {len(drifted)} DRIFTED:\n" + "\n".join(_sorted_lines(drifted))
+    drifted, unverifiable = _split(world, status, facts)
+    n_drifted, n_unverifiable = _fact_counts(facts, drifted, unverifiable)
+    n_verified = len(facts) - n_drifted - n_unverifiable
+    out = f"verified {n_verified}/{len(facts)} anchors against {world}"
+    drifted_facts = [f for f in facts if anchor_key(f) in drifted]
+    unverifiable_facts = [f for f in facts if anchor_key(f) in unverifiable]
+    if not drifted_facts and not unverifiable_facts:
+        return out + "; 0 drifted"
+    if drifted_facts:
+        out += f"; {len(drifted_facts)} DRIFTED:\n" + "\n".join(
+            _sorted_lines(drifted_facts)
+        )
+    if unverifiable_facts:
+        out += (
+            f"; {len(unverifiable_facts)} UNVERIFIABLE "
+            "(no local checkout, remote unreachable):\n"
+            + "\n".join(_sorted_lines(unverifiable_facts))
+        )
+    return out
 
 
 def compute_status(chart_dir: Path, world: Path, fetch=fetch_remote_file) -> dict:
@@ -240,7 +273,7 @@ def build_server(chart_dir: Path, world: Path, fetch=fetch_remote_file):
         ),
     )
     def _staleness(scope: str | None = None) -> str:
-        return staleness_check(chart_dir, world, scope)
+        return staleness_check(chart_dir, world, status, scope)
 
     @app.tool(
         name="get_derived_facts",

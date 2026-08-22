@@ -71,10 +71,10 @@ def check(
     world = Path(world)
     status = chart_status(Path(chart_dir), world, facts, fetch=fetch)
     drifted, unverifiable = _split(world, status, facts)
-    n_verified = len(facts) - len(drifted) - len(unverifiable)
-    print(f"verified {n_verified}/{len(facts)} anchors against {world}")
     drifted_facts = [f for f in facts if anchor_key(f) in drifted]
     unverifiable_facts = [f for f in facts if anchor_key(f) in unverifiable]
+    n_verified = len(facts) - len(drifted_facts) - len(unverifiable_facts)
+    print(f"verified {n_verified}/{len(facts)} anchors against {world}")
     if not drifted_facts:
         print("0 drifted")
     else:

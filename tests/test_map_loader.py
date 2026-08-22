@@ -184,6 +184,17 @@ def test_lint_rejects_traversal_and_absolute_paths():
     abs_problems = lint_facts([absolute])
     assert any("unsafe path" in p for p in abs_problems)
 
+    dot = _anchored_fact(path=".")
+    dot["anchor"] = dict(dot["anchor"], path=".")
+    dot_problems = lint_facts([dot])
+    assert any("unsafe path" in p for p in dot_problems)
+
+    # an empty path is caught earlier, by the required-fields lint (it is
+    # falsy so `path` is reported missing before the path-shape lint runs)
+    empty = _anchored_fact(path="")
+    empty_problems = lint_facts([empty])
+    assert any("missing" in p and "path" in p for p in empty_problems)
+
     assert not any("unsafe path" in p for p in lint_facts([clean]))
 
 

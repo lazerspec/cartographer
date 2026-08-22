@@ -103,13 +103,13 @@ def test_who_mentions_case_insensitive_and_miss(tmp_path):
 
 def test_staleness_clean_drifted_and_scope_filter(tmp_path):
     chart, world = _mint(tmp_path)
-    assert "verified 2/2" in staleness_check(chart, world)
+    assert "verified 2/2" in staleness_check(chart, world, {})
     (world / "svc/a.py").write_text("amount = order.total_v2  # drifted\n")
-    out = staleness_check(chart, world)
+    out = staleness_check(chart, world, {})
     assert "verified 1/2" in out
     assert "DRIFTED" in out
     assert "order.total" in out
-    clean = staleness_check(chart, world, scope="cart")
+    clean = staleness_check(chart, world, {}, scope="cart")
     assert "verified 1/1" in clean
     assert "0 drifted" in clean
 
@@ -124,7 +124,7 @@ def test_fail_closed_on_tamper(tmp_path):
         lambda: chart_index(chart, world, {}),
         lambda: get_scope_facts(chart, world, {}, "order"),
         lambda: who_mentions(chart, world, {}, "amount"),
-        lambda: staleness_check(chart, world),
+        lambda: staleness_check(chart, world, {}),
     ]
     for call in calls:
         with pytest.raises(LintError):
@@ -223,7 +223,7 @@ def test_untagged_charts_serve_unchanged(tmp_path):
     assert "1 facts" in chart_index(d, world, {})  # S2: untagged == served
     # S3: staleness covers all facts regardless of tier
     (world / "p.ts").write_text("const a = y.b_v2;\n")
-    out = staleness_check(d, world)
+    out = staleness_check(d, world, {})
     assert "1 DRIFTED" in out
 
 
@@ -233,7 +233,7 @@ def test_staleness_covers_both_tiers(tmp_path):
     d, _world = _tiered_chart(tmp_path)
     world = tmp_path / "w"
     world.mkdir()
-    out = staleness_check(d, world)
+    out = staleness_check(d, world, {})
     assert "2 anchors" in out or "verified 0/2" in out
 
 
@@ -375,10 +375,33 @@ def test_mcp_banner_remote(tmp_path):
     assert cart_line2.endswith(UNVERIFIED_MARK)
 
 
-def test_staleness_check_unchanged_by_feature(tmp_path):
+def test_staleness_check_three_state(tmp_path):
+    """staleness_check now agrees with the serving tools: local-drift,
+    remote-ok, and unverifiable are all reachable and reported."""
     chart, world = _mint(tmp_path)
-    out = staleness_check(chart, world)
-    assert out.startswith("verified ")
+    clean = staleness_check(chart, world, {})
+    assert clean.startswith("verified 2/2")
+    assert "0 drifted" in clean
+
+    chart2, world2, _original_text = _remote_split_chart(tmp_path / "second")
+    facts = json.loads((chart2 / "shared.json").read_text())
+
+    # local-drift (svc-a, no remote involved) + remote-ok (svc-b matches)
+    (world2 / "svc-a" / "a.py").write_text("amount = order.total_v2  # drifted\n")
+    status_ok = chart_status(chart2, world2, facts, fetch=lambda s, p: _original_text)
+    out_ok = staleness_check(chart2, world2, status_ok)
+    assert "verified 1/2" in out_ok
+    assert "1 DRIFTED" in out_ok
+    assert "order.total" in out_ok
+    assert "UNVERIFIABLE" not in out_ok
+
+    # local-drift + remote-unverifiable (fetch unreachable)
+    status_unreachable = chart_status(chart2, world2, facts, fetch=lambda s, p: None)
+    out_unreach = staleness_check(chart2, world2, status_unreachable)
+    assert "verified 0/2" in out_unreach
+    assert "1 DRIFTED" in out_unreach
+    assert "1 UNVERIFIABLE (no local checkout, remote unreachable):" in out_unreach
+    assert "cart.amount" in out_unreach
 
 
 # --- Fix 1/2/4: anchor-keyed snapshot, per-file local check, safe startup --
@@ -481,3 +504,43 @@ def test_compute_status_returns_empty_on_broken_chart(tmp_path):
     world = tmp_path / "world"
     world.mkdir()
     assert compute_status(chart, world) == {}
+
+
+def test_banner_counts_facts_not_anchor_keys(tmp_path):
+    """Two facts sharing one anchor, both drifted: the banner must count 2
+    facts, not 1 distinct anchor key."""
+    world = tmp_path / "world"
+    (world / "svc-a" / "src").mkdir(parents=True)
+    (world / "svc-a" / "src" / "publish.py").write_text(
+        "def publish():\n    emit('EventA')\n    return True\n"
+    )
+    chart = tmp_path / "chart"
+    chart.mkdir()
+    anchor = make_code_anchor(world, "svc-a/src/publish.py", (1, 3), "r1", "2026-08-22")
+    f1 = {
+        "subject": "svc-a",
+        "predicate": "emits_event",
+        "object": "EventA",
+        "scope": "svc-a",
+        "owner": "t",
+        "path": "svc-a/src/publish.py",
+        "anchor": dict(anchor),
+    }
+    f2 = {
+        "subject": "svc-a",
+        "predicate": "writes_table",
+        "object": "tbl_a",
+        "scope": "svc-a",
+        "owner": "t",
+        "path": "svc-a/src/publish.py",
+        "anchor": dict(anchor),
+    }
+    (chart / "flow.json").write_text(json.dumps([f1, f2]))
+    write_manifest(chart)
+
+    # drift the shared anchor
+    (world / "svc-a" / "src" / "publish.py").write_text(
+        "def publish():\n    emit('EventB')\n    return True\n"
+    )
+    out = get_scope_facts(chart, world, {}, "svc-a")
+    assert out.startswith("WARNING: 2 of 2")

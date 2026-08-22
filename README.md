@@ -78,7 +78,10 @@ Services you do not have checked out are verified straight against the git
 host: list each service's repo in the map's sources.json and sign in with
 the GitHub CLI. Only a change to the exact pinned lines raises a flag.
 Facts that cannot be verified either way are reported as unverifiable,
-never silently passed.
+never silently passed. When a pinned file is missing from your local
+checkout but the service is listed in sources.json, the check trusts the
+git host's copy; a file you deleted locally therefore still verifies
+against master.
 
 ### Serve
 
