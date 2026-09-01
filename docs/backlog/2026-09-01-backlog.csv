@@ -1,0 +1,94 @@
+Title,Description,Priority,Labels,Status
+A1: Lint must require a well-formed anchor on every fact,"Claim: a fact with no `anchor`, or an anchor missing `content_hash`, or `lines` that is not `[int, int]`, passes `lint_facts` and seals. Afterwards `cartographer check` and every MCP tool crash with KeyError/IndexError. README rule 2 (""every fact is anchored"") is unenforced.
+Where: src/cartographer/map_loader.py `_REQUIRED_FIELDS` and the anchor checks in `lint_facts`.
+Expected: lint problem ""fact missing anchor"" / ""anchor missing content_hash"" / ""anchor lines must be [lo, hi]""; `seal` refuses; `load_sealed_chart` raises LintError so serving fails closed with a verdict, not a traceback.
+Verified 2026-09-01 by independent reproduction: docs/backlog/repro/A1.py (KeyError 'anchor', IndexError, KeyError 'content_hash').
+Acceptance: A1.py shows lint problems and no exceptions; new test `test_lint_requires_well_formed_anchor`.",Urgent,"trust,0.3.2",Verified
+"A2: Reject line ranges that slice to an empty excerpt (past EOF, lo>hi, lo<=0)","Claim: `_slice` silently returns """" for ranges past EOF, lo>hi, or lo<=0. The anchor then hashes the empty string, `verify_excerpt` returns True against ANY file, and such a fact can never drift. A typo in line numbers creates a permanently verified fact.
+Where: src/cartographer/anchor.py `_slice`, `make_code_anchor`, `verify_excerpt`; lint in map_loader.py.
+Expected: `_slice` raises ValueError when lo<1, hi<lo, or hi>len(body); `make_code_anchor` propagates it; `verify_excerpt` returns False on it; lint rejects lines with lo<1 or hi<lo. Also treat an empty-string excerpt hash as a lint problem.
+Verified 2026-09-01: docs/backlog/repro/A2.py ((5,9),(3,1),(0,0),(0,2),(-1,1) all slice to """"; check exits 0 after rewrite for (3,1) and (0,0); past-EOF stays vacuous while the file is shorter than lo).
+Acceptance: A2.py shows ValueError/False; new test `test_anchor_past_eof_never_verifies`.",Urgent,"trust,0.3.2",Verified
+A3: Server reports a fact clean after its local file disappears mid-session,"Claim: `compute_status` records ""ok"" for a file verified locally at startup. If the file is then deleted (branch switch, checkout change), `_split` treats the snapshot ""ok"" as remote-verified: `staleness_check` says ""verified 1/1; 0 drifted"" and `get_scope_facts` shows no mark, while `cartographer check` on the same state says DRIFTED (or UNVERIFIABLE with sources.json).
+Where: src/cartographer/mcp_server.py `_split` else-branch; src/cartographer/remote.py `fact_status`.
+Expected: server and CLI always agree. Distinguish locally-verified ""ok"" from remote ""ok"" in the snapshot (e.g. OK_LOCAL, or omit local results from the snapshot). When the file is absent, only a remote OK counts as clean; otherwise fall to the same DRIFTED/UNVERIFIABLE rule `fact_status` uses. Factor that tail into one shared helper.
+Verified 2026-09-01: docs/backlog/repro/A3.py.
+Acceptance: A3.py shows staleness_check DRIFTED/UNVERIFIABLE matching check; new test `test_server_and_cli_agree_after_file_removed`.",Urgent,"trust,0.3.2",Verified
+A4: `check` exits 0 with zero facts verified; drift workflow template lacks --strict,"Claim: `cartographer check chart --world /typo` prints ""verified 0/N"", all UNVERIFIABLE, and exits 0. A CI checkout landing in the wrong path stays green. The scaffolded drift-example.yml runs check without --strict.
+Where: src/cartographer/cli.py `check`; src/cartographer/templates/drift-example.yml.
+Expected: exit 2 with ""world directory not found"" when --world does not exist; exit 1 when facts exist and n_verified == 0; template uses --strict. Also fold ""run `cartographer seal`"" into the CHART REFUSED message.
+Verified 2026-09-01: docs/backlog/repro/A4.py (rc 0 in-process and subprocess).
+Acceptance: A4.py shows nonzero exit; tests `test_check_missing_world_exit_2`, `test_check_zero_verified_is_failure`.",High,"trust,0.3.2",Verified
+A5: Malformed manifest / fact JSON / dotfile in chart dir: traceback instead of exit 2,"Claim: (c) chart.manifest with invalid JSON raises json.JSONDecodeError which `check` does not catch: traceback, exit 1 (same code as drifted). (e) Pointing `check` or `seal` at the map root instead of `chart/` makes glob('*.json') read `.mcp.json`; `facts.extend(dict)` inserts strings and lint crashes with AttributeError.
+Where: src/cartographer/map_loader.py `verify_manifest`, `load_chart`, `load_sealed_chart`; cli.py `seal`.
+Expected: every JSON parse failure and every non-list fact file becomes a LintError problem (""not a chart directory (expected chart/*.json); did you mean <dir>/chart?""); glob skips names starting with "".""; `check` exits 2.
+Verified 2026-09-01: docs/backlog/repro/A5.py cases (c) and (e).
+Acceptance: A5.py (c),(e) show exit 2 with CHART REFUSED; test `test_check_exit_2_on_corrupt_manifest_or_fact_json`.",High,"trust,0.3.2",Verified
+A6: Non-UTF-8 pinned file or directory-as-path crashes verification,"Claim: (a) a pinned file containing non-UTF-8 bytes raises UnicodeDecodeError from `verify_anchor` (check tracebacks; MCP tools error mid-serve; the remote path swallows the same error into UNVERIFIABLE, so local and remote disagree). (b) a pinned path that is a directory passes `.exists()` and raises IsADirectoryError.
+Where: src/cartographer/anchor.py `verify_anchor`, `make_code_anchor`; remote.py `fact_status`; mcp_server.py `_split`.
+Expected: read with encoding=""utf-8"", errors=""surrogateescape"" in local and remote paths alike; use `is_file()` not `exists()`; a directory or unreadable file reports DRIFTED (local) and never raises.
+Verified 2026-09-01: docs/backlog/repro/A5.py cases (a) and (b).
+Acceptance: A5.py (a),(b) show verdicts, no traceback; test `test_non_utf8_pinned_file_reports_not_crashes`.",High,"trust,0.3.2",Verified
+A7: Validate sources.json entries; string values crash fetch_remote_file,"Claim: `{""svc"": ""org/svc""}` in sources.json raises AttributeError in `fetch_remote_file` (source.get on a str) outside the try block. Invalid JSON in sources.json silently becomes {} with no message. Single-component fact paths fetch path_in_repo="""" (the repo root listing).
+Where: src/cartographer/remote.py `load_sources`, `fetch_remote_file`, `fact_status`.
+Expected: `load_sources` validates shape (dict of dicts with ""repo"" str) and prints one stderr warning naming the bad entry; bad entries are treated as absent; single-component paths are UNVERIFIABLE without a fetch (or a lint). URL-encode path_in_repo.
+Verified 2026-09-01: docs/backlog/repro/A5.py case (d).
+Acceptance: A5.py (d) shows UNVERIFIABLE with a warning; tests for string entry, invalid JSON, single-component path.",Medium,"trust,0.3.2",Verified
+A8: serve runs remote verification twice at startup,"Claim: `serve` calls `startup_staleness_notice` (its own chart_status with gh fetches) and then `build_server` -> `compute_status` (again). With F remote files and a black-holed network that is up to 2 x F x 30 s before the server answers, and the notice and the tools can disagree.
+Where: src/cartographer/cli.py `serve`, `startup_staleness_notice`; mcp_server.py `build_server`, `compute_status`.
+Expected: compute the snapshot once in `serve`, print the notice from it, pass it into `build_server(status=...)`. Give `startup_staleness_notice` a `fetch` parameter so tests never reach real gh.
+Verified 2026-09-01: docs/backlog/repro/A6.py (2 gh api calls for one file).
+Acceptance: A6.py shows 1 call; test `test_serve_computes_status_once`.",Medium,"trust,0.3.2",Verified
+A9: Kill the four mutations the test suite does not catch,"Claim: each of these single mutations leaves all 75 tests passing: (i) delete the ""chart file not in manifest"" guard; (ii) delete the fact_count check; (iii) remove the try/except in fetch_remote_file; (iv) make verify_anchor return True for a missing file.
+Where: tests/test_map_loader.py, tests/test_remote.py, tests/test_anchor.py.
+Expected: `test_manifest_rejects_unlisted_extra_file`, `test_manifest_rejects_fact_count_mismatch`, `test_fetch_returns_none_when_gh_missing` (FileNotFoundError and TimeoutExpired), `test_verify_anchor_missing_file_is_false`. Each must fail against its mutation.
+Verified 2026-09-01: docs/backlog/repro/A7.sh (75 passed under every mutation).
+Acceptance: A7.sh shows failures under each mutation.",High,"tests,0.3.2",Verified
+A10: Replace vacuous ordering and staleness assertions; cover README promises,"Claim: `test_deterministic_and_sorted` passes with the renderer's sort removed (glob order supplies it); `_sorted_lines` order is asserted nowhere; `test_staleness_covers_both_tiers` uses an `or` that passes when unverifiable facts are silently counted as verified. README promises with no test: ""only a change to the exact pinned lines raises a flag"", ""every answer starts with a stale warning"" (who_mentions, get_derived_facts, chart_index NOTE), ""check is read-only"", ""serves the local copy if the pull fails"", tool calls through the MCP layer surface LintError.
+Where: tests/test_chart_context.py, tests/test_mcp_server.py, tests/test_cli.py.
+Expected: the tests named in the review: `test_render_order_independent_of_file_layout`, `test_staleness_covers_both_tiers_exact`, `test_check_ignores_change_outside_pinned_lines`, `test_banners_on_who_mentions_and_derived`, `test_fail_closed_all_five_tools_incl_derived`, `test_check_is_read_only`, `test_serve_pull_failure_still_serves`, `test_call_tool_propagates_lint_error`.
+Verified 2026-09-01 by mutation on a repo copy (M1b, M2, M4 in the test-gap review).
+Acceptance: each new test fails against its mutation and passes on the fix branch.",Medium,"tests,0.3.2",Verified
+"B1: README: remove the false 'no network calls' claim; document --strict, exit codes, remote deletion","Claim: README.md:75 and :112 say the check needs no network and the tool makes no network calls, but `check` shells out to `gh api` and `serve --pull` runs `git pull`. `--strict` and `seal`'s exit codes are undocumented.
+Expected: reword to ""No hosted service, no telemetry. The only network use is optional: --pull on your own map repo, and gh fetches of pinned files when a service is not checked out."" Add --strict, the exit-code table, and the decision (Parvir 2026-09-01) that a file deleted on the git host is reported UNVERIFIABLE, not drifted.
+Verified 2026-09-01 (B1).",High,docs,Verified
+B2: Rename the distribution to cartographer-mcp and complete pyproject metadata,"Claim: the PyPI name ""cartographer"" is taken (Patreon JSON-API lib 0.1.2); ""cartographer-mcp"" is free. pyproject.toml has no authors, classifiers, keywords, or [project.urls]; no src/cartographer/py.typed.
+Decision (Parvir 2026-09-01): distribution name cartographer-mcp; import name and command stay `cartographer`.
+Expected: [project].name = ""cartographer-mcp""; authors; classifiers (Alpha, 3.10-3.13, MIT, Software Development); keywords; urls (Homepage, Repository, Issues, Changelog); py.typed included in the wheel; `--version` reads metadata for the new name.
+Verified 2026-09-01 (B2, B7).",High,packaging,Verified
+"B3: Install section: lead with uv/pipx, warn about macOS Python 3.9, explain .mcp.json PATH","Claim: /usr/bin/python3 on macOS is 3.9.6; the README's venv+pip line fails with ""Could not find a version that satisfies the requirement mcp<2,>=1.2"" and never mentions Python version. The scaffolded .mcp.json runs the bare command `cartographer`, so a venv-only install fails silently inside Claude Code.
+Expected: lead with `uv tool install git+https://github.com/lazerspec/cartographer` and `pipx install git+...`; keep venv as fallback; state ""Python 3.10+; macOS system python3 is 3.9 and fails with an unrelated-looking pip error""; add a Troubleshooting stanza for the MCP PATH problem. Same fix in templates/README.md.
+Verified 2026-09-01 (B3, B12).",High,docs,Verified
+B4: Add cartographer --version; remove duplicate main() in mcp_server,"Claim: `cartographer --version` prints a usage error, exit 2. mcp_server.py has its own argparse main duplicating the CLI.
+Expected: `--version` via importlib.metadata; `serve --help` strings for --chart/--world/--pull; mcp_server.main removed or delegating to cli.
+Verified 2026-09-01 (B4).",Low,cli,Verified
+B5: Replace placeholder URLs in scaffolded templates with the real repo and a pinned tag,"Claim: templates/README.md:16 has `git clone <cartographer repo url>`; templates/drift-example.yml:24 has `pip install git+https://<your clone of cartographer>`.
+Expected: real GitHub URL pinned to the current tag (depends on B10 tagging).
+Verified 2026-09-01 (B6).",Low,docs,Verified
+B6: Fill gaps in the scaffolded CLAUDE.md curation guide,"Claim: the guide does not explain scope and owner (how to pick them), how to get `revision` (git -C <service> rev-parse --short HEAD), the optional provenance metadata keys the renderer honours (asserted_via, pr_ref, decision_ref, issue_ref), the `derived_from` predicate, or ""tier"": ""derived"". The anchor recipe is a python -c import that fails under pipx/uv installs (superseded by C1).
+Expected: add those sections; after C1 lands, replace the recipe with `cartographer anchor`.
+Verified 2026-09-01 (B5).",Medium,docs,Verified
+B7: Sharpen MCP tool descriptions as seen by an agent,"Claim: chart_index does not say ""call this first; it lists scope names""; get_scope_facts says ""all verified facts"" though stale ones are served with a mark; staleness_check does not mention three states; scope is exact-match and case-sensitive, unstated.
+Where: src/cartographer/mcp_server.py tool descriptions.
+Expected: the wording proposed in the 2026-09-01 review.",Medium,docs,Verified
+"B8: CI hygiene: branch filter, wider matrix, build step, coverage gate, dependabot","Claim: ci.yml triggers on every push AND pull_request (PRs run twice); matrix is 3.10/3.12 only; no build step; no coverage threshold though pytest-cov is installed.
+Expected: push: branches [main] + pull_request; 3.10-3.13; concurrency; pip cache; `python -m build`; `--cov --cov-fail-under=90`; .github/dependabot.yml for pip and github-actions weekly; pytest filterwarnings for the mcp SDK pydantic warning.
+Verified 2026-09-01 (B9, B11).",Medium,ci,Verified
+"B9: Add CHANGELOG, CONTRIBUTING, SECURITY, issue templates","Claim: none exist. Git log already has clean feat/fix lines for 0.2.0 -> 0.3.1.
+Expected: CHANGELOG.md transcribed from the log; CONTRIBUTING.md pointing at docs/workflow.md and the four CI commands; SECURITY.md (private report address; note check executes gh/git and reads only pinned files); .github/ISSUE_TEMPLATE/bug.yml + config.yml.
+Verified 2026-09-01 (B7).",Medium,docs,Verified
+"B10: GitHub repo settings: description, topics, tag v0.3.1 and a release","Claim: description empty, no topics, no tags, no releases.
+Expected: description ""Curated, source-anchored map of cross-service behaviour served to coding agents over MCP""; topics mcp, claude-code, coding-agents, architecture, documentation; `git tag v0.3.1` on ea09a59..3f140d5 head and a GitHub release. Maintainer action or gh.
+Verified 2026-09-01 (B8).",Low,release,Verified
+B11: Scrub internal research jargon from public source comments,"Claim: mcp_server.py:1-3 says ""v0"" and ""Four pull tools"" (five registered), :293 ""v0""; map_loader.py:88 ""live treaty violation"", :129-130 ""adjudicator"", ""treaty-window"", :150 ""MCP v1 hardening, 2026-07-14""; mcp_server.py:107 ""S2:""; anchor.py:14 ""spec §6"".
+Expected: plain-English comments a stranger can read without the private spec.
+Verified 2026-09-01 (B10).",Low,docs,Verified
+B12: gitignore tool caches and build/,"Claim: .gitignore lacks .mypy_cache/, .pytest_cache/, .ruff_cache/, build/. They are hidden only because each tool writes its own .gitignore; build/ would show as untracked after a wheel build.
+Verified 2026-09-01 (B11, partial: no global ignore involved).",Low,chore,Verified
+B13: Eval guide: say what to tune when flags are noisy; mention check --strict for CI,"Claim: docs/evaluating-the-map.md says ""frequent noise is a tuning problem"" without saying what to tune (tighter ranges, anchor to a stable declaration rather than a call site) and does not mention --strict for the ""miss"" case.",Low,docs,Proposed
+C1: cartographer anchor <path> --lines A-B subcommand,"Prints the anchor JSON for a file and line range, defaulting revision to `git -C <service> rev-parse --short HEAD` and date to today. Replaces the python -c recipe in CLAUDE.md, works with pipx/uv tool installs, and is the single biggest curation-loop improvement. Consider `cartographer add --approved-by <name>` that appends a lint-checked fact (still human-gated).",High,feature,Proposed
+C2: check --json for CI consumers,"Structured output (per fact: identity, anchor, state ok/drifted/unverifiable) plus a documented schema next to the exit codes. Lets the drift workflow and other tooling consume results.",Medium,feature,Proposed
+C3: reanchor --dry-run: propose L2 relocations for human approval,"anchor.py's dispose/run_ladder ladder is tested but unreachable from the CLI. Expose it read-only: list facts whose excerpt was found at exactly one new location and print the proposed new anchor; never write. The curator approves, the agent applies, seal. Keeps rule 1 intact.",Medium,feature,Proposed
+C4: Release workflow: tag -> build -> PyPI trusted publishing,Depends on B2 (name). .github/workflows/release.yml on v* tags: uv build + pypa/gh-action-pypi-publish with trusted publishing. Then `pip install cartographer-mcp` works.,Medium,release,Proposed
+C5: examples/ two-service demo map and a README recording,"Two tiny services and a sealed five-fact map, plus a 60-second recording of init -> seal -> drift -> STALE banner in Claude Code. Explains the product faster than prose.",Low,docs,Proposed
+C6: Smart defaults: infer chart and world when run inside a map repo,`cartographer check` with no args from inside a scaffolded map repo uses ./chart and .. as world. Reduces the three-argument incantation newcomers hit.,Low,feature,Proposed
