@@ -18,6 +18,7 @@ testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 88
+exclude = ["docs/backlog/repro"]
 
 [build-system]
 requires = ["hatchling"]
