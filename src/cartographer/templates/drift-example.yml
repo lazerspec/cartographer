@@ -22,5 +22,6 @@
 #       - uses: actions/setup-python@v5
 #         with: { python-version: "3.12" }
 #       - run: pip install git+https://<your clone of cartographer>
-#       - run: cartographer check map/chart --world .
-#         # nonzero exit fails the job -> your team sees which facts drifted
+#       - run: cartographer check map/chart --world . --strict
+#         # --strict also fails on facts that could not be verified at all, so a
+#         # wrong checkout path never passes silently. Nonzero exit fails the job.
