@@ -350,3 +350,34 @@ def test_all_drifted_does_not_claim_nothing_was_checked(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "2 DRIFTED" in out
     assert "nothing could be checked" not in out
+
+
+def test_check_exit_2_on_corrupt_manifest_or_fact_json(tmp_path, capsys):
+    world = write_world(tmp_path)
+    chart = write_chart(tmp_path, world)
+    seal(chart)
+    good_manifest = (chart / "chart.manifest").read_text()
+    (chart / "chart.manifest").write_text("{not json")
+    assert check(chart, world) == 2
+    assert "CHART REFUSED" in capsys.readouterr().err
+    (chart / "chart.manifest").write_text(good_manifest)
+    (chart / "flow.json").write_text("[{broken")
+    assert check(chart, world) == 2
+    assert "invalid JSON in flow.json" in capsys.readouterr().err
+
+
+def test_check_and_seal_refuse_map_root(tmp_path, capsys):
+    world = write_world(tmp_path)
+    chart = write_chart(tmp_path, world)
+    seal(chart)
+    map_root = chart.parent
+    (map_root / ".mcp.json").write_text(json.dumps({"mcpServers": {}}))
+    (map_root / "sources.json").write_text("{}")
+    assert check(map_root, world) == 2
+    err = capsys.readouterr().err
+    assert "did you mean" in err and str(chart) in err
+    with pytest.raises(SystemExit) as exc:
+        seal(map_root)
+    assert "did you mean" in str(exc.value)
+    # the real chart is untouched by the misdirected seal
+    assert check(chart, world) == 0

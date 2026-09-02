@@ -15,6 +15,9 @@ from cartographer.chart_context import _fact_line
 from cartographer.map_loader import (
     MANIFEST_NAME,
     LintError,
+    _fact_files,
+    _not_a_chart_hint,
+    _read_fact_files,
     lint_facts,
     load_sealed_chart,
 )
@@ -27,18 +30,13 @@ def seal(chart_dir: Path) -> str:
     chart_dir = Path(chart_dir)
     if not chart_dir.is_dir():
         raise SystemExit(f"not a directory: {chart_dir}")
-    facts: list[dict] = []
-    files: dict[str, str] = {}
-    for p in sorted(chart_dir.glob("*.json")):
-        try:
-            loaded = json.loads(p.read_text())
-        except json.JSONDecodeError as e:
-            raise SystemExit(f"invalid JSON in {p.name}: {e}") from e
-        if not isinstance(loaded, list):
-            raise SystemExit(f"{p.name}: top level must be a JSON list of facts")
-        facts.extend(loaded)
-        files[p.name] = "sha256:" + hashlib.sha256(p.read_bytes()).hexdigest()
-    problems = lint_facts(facts)
+    facts, problems = _read_fact_files(chart_dir)
+    problems = _not_a_chart_hint(chart_dir) + problems
+    files = {
+        p.name: "sha256:" + hashlib.sha256(p.read_bytes()).hexdigest()
+        for p in _fact_files(chart_dir)
+    }
+    problems += lint_facts(facts)
     if problems:
         raise SystemExit(
             "refusing to seal a chart that fails lint:\n" + "\n".join(problems)

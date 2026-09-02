@@ -145,27 +145,81 @@ def lint_facts(facts: list[dict]) -> list[str]:
 MANIFEST_NAME = "chart.manifest"
 
 
+def _fact_files(chart_dir: Path) -> list[Path]:
+    """Fact files are chart/*.json; dotfiles such as .mcp.json never are."""
+    return sorted(
+        p for p in Path(chart_dir).glob("*.json") if not p.name.startswith(".")
+    )
+
+
+def _read_fact_files(chart_dir: Path) -> tuple[list[dict], list[str]]:
+    """Read every fact file. Parse failures, non-list files and non-object
+    entries become lint problems instead of exceptions, so a curator sees a
+    verdict and a server never partially loads."""
+    facts: list[dict] = []
+    problems: list[str] = []
+    for p in _fact_files(chart_dir):
+        try:
+            loaded = json.loads(p.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            problems.append(f"invalid JSON in {p.name}: {e}")
+            continue
+        if not isinstance(loaded, list):
+            problems.append(f"{p.name}: top level must be a JSON list of facts")
+            continue
+        for i, item in enumerate(loaded):
+            if not isinstance(item, dict):
+                problems.append(f"{p.name}[{i}]: fact must be a JSON object")
+                continue
+            facts.append(item)
+    return facts, problems
+
+
+def _not_a_chart_hint(chart_dir: Path) -> list[str]:
+    """Pointed at a map root instead of its chart/ subdirectory."""
+    chart_dir = Path(chart_dir)
+    nested = chart_dir / "chart"
+    if not (chart_dir / MANIFEST_NAME).exists() and nested.is_dir():
+        return [
+            (
+                f"not a chart directory (expected {MANIFEST_NAME} and *.json fact "
+                f"files); did you mean {nested}?"
+            )
+        ]
+    return []
+
+
 def verify_manifest(chart_dir: Path) -> list[str]:
     chart_dir = Path(chart_dir)
     mpath = chart_dir / MANIFEST_NAME
     if not mpath.exists():
         return [f"chart manifest missing: {mpath}"]
-    manifest = json.loads(mpath.read_text())
+    try:
+        manifest = json.loads(mpath.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        return [f"chart manifest unreadable: {e}"]
+    if not isinstance(manifest, dict) or not isinstance(manifest.get("files"), dict):
+        return ['chart manifest malformed: expected {"files": {...}, "fact_count": N}']
     problems: list[str] = []
-    fact_files = {p.name for p in chart_dir.glob("*.json")}
-    listed = set(manifest.get("files", {}))
+    fact_files = {p.name for p in _fact_files(chart_dir)}
+    listed = set(manifest["files"])
     for name in sorted(fact_files - listed):
         problems.append(f"chart file not in manifest: {name}")
     count = 0
-    for name, digest in manifest.get("files", {}).items():
+    for name, digest in manifest["files"].items():
         p = chart_dir / name
-        if not p.exists():
+        if not p.is_file():
             problems.append(f"manifest lists missing file: {name}")
             continue
         actual = "sha256:" + hashlib.sha256(p.read_bytes()).hexdigest()
         if actual != digest:
             problems.append(f"manifest hash mismatch on {name}")
-        count += len(json.loads(p.read_text()))
+        try:
+            loaded = json.loads(p.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            continue  # reported by _read_fact_files
+        if isinstance(loaded, list):
+            count += len(loaded)
     if count != manifest.get("fact_count"):
         problems.append(
             f"manifest fact_count {manifest.get('fact_count')} != actual {count}"
@@ -182,10 +236,9 @@ def load_chart(
     treaty-window contradiction) in order to fix it; only SERVING is
     fail-closed (load_sealed_chart)."""
     chart_dir = Path(chart_dir)
-    facts: list[dict] = []
-    for p in sorted(chart_dir.glob("*.json")):
-        facts.extend(json.loads(p.read_text()))
-    problems: list[str] = []
+    problems = _not_a_chart_hint(chart_dir)
+    facts, read_problems = _read_fact_files(chart_dir)
+    problems += read_problems
     if require_manifest or (chart_dir / MANIFEST_NAME).exists():
         problems += verify_manifest(chart_dir)
     problems += lint_facts(facts)
@@ -194,12 +247,11 @@ def load_chart(
 
 def load_sealed_chart(maps_dir: Path) -> list[dict]:
     maps_dir = Path(maps_dir)
-    facts: list[dict] = []
-    for p in sorted(maps_dir.glob("*.json")):
-        facts.extend(json.loads(p.read_text()))
-    problems: list[str] = []
+    problems = _not_a_chart_hint(maps_dir)
+    facts, read_problems = _read_fact_files(maps_dir)
+    problems += read_problems
     # Serving fail-closed includes ABSENCE: a deleted manifest must not
-    # silently bypass verification (MCP v1 hardening, 2026-07-14).
+    # silently bypass verification.
     problems += verify_manifest(maps_dir)
     problems += lint_facts(facts)
     if problems:

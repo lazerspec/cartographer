@@ -327,3 +327,45 @@ def test_lint_rejects_empty_excerpt_hash():
     f = _anchored_fact()
     f["anchor"] = dict(f["anchor"], content_hash=excerpt_hash(""))
     assert any("empty excerpt" in p for p in lint_facts([f]))
+
+
+def test_dotfiles_and_non_list_files_are_lint_problems(tmp_path):
+    import json as _json
+
+    from cartographer.map_loader import load_chart
+
+    (tmp_path / ".mcp.json").write_text(_json.dumps({"mcpServers": {}}))
+    (tmp_path / "sources.json").write_text(_json.dumps({"svc": {"repo": "o/r"}}))
+    (tmp_path / "s.json").write_text(_json.dumps([_anchored_fact()]))
+    facts, problems = load_chart(tmp_path, require_manifest=False)
+    assert len(facts) == 1
+    assert any("sources.json: top level must be a JSON list" in p for p in problems)
+    assert not any(".mcp.json" in p for p in problems)
+
+
+def test_corrupt_manifest_and_fact_json_are_lint_problems(tmp_path):
+    import json as _json
+
+    from cartographer.map_loader import LintError, load_sealed_chart
+
+    (tmp_path / "s.json").write_text(_json.dumps([_anchored_fact()]))
+    _write_manifest(tmp_path)
+    (tmp_path / "chart.manifest").write_text("{not json")
+    with pytest.raises(LintError) as exc:
+        load_sealed_chart(tmp_path)
+    assert any("chart manifest unreadable" in p for p in exc.value.problems)
+
+    _write_manifest(tmp_path)
+    (tmp_path / "s.json").write_text("[{broken")
+    with pytest.raises(LintError) as exc:
+        load_sealed_chart(tmp_path)
+    assert any("invalid JSON in s.json" in p for p in exc.value.problems)
+
+
+def test_map_root_instead_of_chart_gets_a_hint(tmp_path):
+    from cartographer.map_loader import LintError, load_sealed_chart
+
+    (tmp_path / "chart").mkdir()
+    with pytest.raises(LintError) as exc:
+        load_sealed_chart(tmp_path)
+    assert any("did you mean" in p and "chart" in p for p in exc.value.problems)
