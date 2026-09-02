@@ -236,3 +236,73 @@ def test_anchor_key_changes_on_reanchor(tmp_path):
     f2 = dict(f1)
     f2["anchor"] = dict(f1["anchor"], lines=[2, 2], content_hash="sha256:" + "0" * 64)
     assert anchor_key(f1) != anchor_key(f2)
+
+
+def test_load_sources_ignores_bad_entries_with_warning(tmp_path, capsys):
+    from cartographer.remote import load_sources
+
+    (tmp_path / "sources.json").write_text(
+        json.dumps(
+            {"svc": "org/svc", "ok": {"repo": "org/ok"}, "norepo": {"branch": "x"}}
+        )
+    )
+    assert load_sources(tmp_path) == {"ok": {"repo": "org/ok"}}
+    err = capsys.readouterr().err
+    assert "'svc'" in err and "'norepo'" in err and "warning" in err
+
+
+def test_load_sources_invalid_json_warns(tmp_path, capsys):
+    from cartographer.remote import load_sources
+
+    (tmp_path / "sources.json").write_text("{not json")
+    assert load_sources(tmp_path) == {}
+    assert "invalid JSON" in capsys.readouterr().err
+    (tmp_path / "sources.json").write_text("[1, 2]")
+    assert load_sources(tmp_path) == {}
+    assert "expected a JSON object" in capsys.readouterr().err
+
+
+def test_string_source_entry_is_unverifiable_not_crash(tmp_path):
+    world = write_world(tmp_path)
+    chart = write_chart(tmp_path, world)
+    facts = json.loads((chart / "flow.json").read_text())
+    (world / "svc-b" / "src" / "consume.py").unlink()
+    (world / "svc-b").rename(tmp_path / "gone")
+    (chart.parent / "sources.json").write_text(json.dumps({"svc-b": "org/svc-b"}))
+    status = chart_status(chart, world, facts, fetch=_recording_fetch([]))
+    assert status[anchor_key(facts[1])] == UNVERIFIABLE
+    assert fetch_remote_file("org/svc-b", "src/consume.py") is None
+
+
+def test_single_component_path_never_fetches(tmp_path):
+    world = tmp_path / "workspace"
+    world.mkdir()
+    (world / "README.md").write_text("hello\nworld\nagain\n")
+    f = fact(world, "root", "reads_file", "README", "README.md")
+    (world / "README.md").unlink()
+    sources = {"README.md": {"repo": "org/x"}}
+
+    def fetch_never(source, path_in_repo):
+        raise AssertionError("must not fetch the repository root")
+
+    assert fact_status(world, sources, f, fetch=fetch_never) == UNVERIFIABLE
+
+
+def test_fetch_url_encodes_path(monkeypatch):
+    import subprocess as _sp
+
+    seen: list = []
+
+    def fake_run(cmd, **kw):
+        seen.append(cmd)
+
+        class P:
+            returncode = 0
+            stdout = "x"
+
+        return P()
+
+    monkeypatch.setattr(_sp, "run", fake_run)
+    assert fetch_remote_file({"repo": "o/r"}, "a b/c#d.py") == "x"
+    assert "repos/o/r/contents/a%20b/c%23d.py?ref=main" in seen[0][2]
+    assert fetch_remote_file({"repo": "o/r"}, "") is None
