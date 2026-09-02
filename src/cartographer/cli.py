@@ -42,7 +42,10 @@ def seal(chart_dir: Path) -> str:
             "refusing to seal a chart that fails lint:\n" + "\n".join(problems)
         )
     manifest = {"files": files, "fact_count": len(facts)}
-    (chart_dir / MANIFEST_NAME).write_text(json.dumps(manifest, indent=1) + "\n")
+    try:
+        (chart_dir / MANIFEST_NAME).write_text(json.dumps(manifest, indent=1) + "\n")
+    except OSError as e:
+        raise SystemExit(f"cannot write {MANIFEST_NAME}: {e}") from e
     return f"sealed {chart_dir}: {len(files)} files, {len(facts)} facts"
 
 

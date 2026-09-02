@@ -381,3 +381,13 @@ def test_check_and_seal_refuse_map_root(tmp_path, capsys):
     assert "did you mean" in str(exc.value)
     # the real chart is untouched by the misdirected seal
     assert check(chart, world) == 0
+
+
+def test_seal_refuses_when_manifest_path_is_a_directory(tmp_path):
+    world = write_world(tmp_path)
+    chart = write_chart(tmp_path, world)
+    (chart / "chart.manifest").mkdir()
+    with pytest.raises(SystemExit) as exc:
+        seal(chart)
+    assert "chart.manifest" in str(exc.value)
+    assert (chart / "chart.manifest").is_dir()  # nothing overwritten

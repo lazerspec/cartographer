@@ -369,3 +369,58 @@ def test_map_root_instead_of_chart_gets_a_hint(tmp_path):
     with pytest.raises(LintError) as exc:
         load_sealed_chart(tmp_path)
     assert any("did you mean" in p and "chart" in p for p in exc.value.problems)
+
+
+def test_manifest_shape_and_entries_are_validated(tmp_path):
+    import json as _json
+
+    from cartographer.map_loader import verify_manifest
+
+    (tmp_path / "s.json").write_text(_json.dumps([_anchored_fact()]))
+    for bad in ("[]", '"x"', "5", _json.dumps({"files": []})):
+        (tmp_path / "chart.manifest").write_text(bad)
+        assert any(
+            "manifest malformed" in p or "manifest unreadable" in p
+            for p in verify_manifest(tmp_path)
+        ), bad
+    _write_manifest(tmp_path)
+    m = _json.loads((tmp_path / "chart.manifest").read_text())
+    for name in ("../s.json", "/etc/s.json", ".hidden.json", "s.txt", "sub/s.json"):
+        m2 = {
+            "files": dict(m["files"], **{name: m["files"]["s.json"]}),
+            "fact_count": m["fact_count"],
+        }
+        (tmp_path / "chart.manifest").write_text(_json.dumps(m2))
+        assert any("invalid entry" in p for p in verify_manifest(tmp_path)), name
+    m3 = {"files": m["files"], "fact_count": True}
+    (tmp_path / "chart.manifest").write_text(_json.dumps(m3))
+    assert any("fact_count" in p for p in verify_manifest(tmp_path))
+
+
+def test_non_regular_chart_entries_are_lint_problems(tmp_path):
+    import json as _json
+
+    from cartographer.map_loader import LintError, load_chart, load_sealed_chart
+
+    (tmp_path / "s.json").write_text(_json.dumps([_anchored_fact()]))
+    _write_manifest(tmp_path)
+    (tmp_path / "sub.json").mkdir()
+    (tmp_path / "dangling.json").symlink_to(tmp_path / "nowhere")
+    facts, problems = load_chart(tmp_path, require_manifest=False)
+    assert len(facts) == 1
+    assert any("sub.json: not a regular file" in p for p in problems)
+    assert any("dangling.json: not a regular file" in p for p in problems)
+    (tmp_path / "chart.manifest").unlink()
+    (tmp_path / "chart.manifest").mkdir()
+    with pytest.raises(LintError) as exc:
+        load_sealed_chart(tmp_path)
+    assert any("manifest is not a regular file" in p for p in exc.value.problems)
+
+
+def test_pathological_json_nesting_is_a_lint_problem(tmp_path):
+    from cartographer.map_loader import load_chart
+
+    (tmp_path / "s.json").write_text("[" * 100000)
+    facts, problems = load_chart(tmp_path, require_manifest=False)
+    assert facts == []
+    assert any("invalid JSON in s.json" in p for p in problems)

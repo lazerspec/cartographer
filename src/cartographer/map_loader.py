@@ -148,7 +148,9 @@ MANIFEST_NAME = "chart.manifest"
 def _fact_files(chart_dir: Path) -> list[Path]:
     """Fact files are chart/*.json; dotfiles such as .mcp.json never are."""
     return sorted(
-        p for p in Path(chart_dir).glob("*.json") if not p.name.startswith(".")
+        p
+        for p in Path(chart_dir).glob("*.json")
+        if not p.name.startswith(".") and p.is_file()
     )
 
 
@@ -158,11 +160,19 @@ def _read_fact_files(chart_dir: Path) -> tuple[list[dict], list[str]]:
     verdict and a server never partially loads."""
     facts: list[dict] = []
     problems: list[str] = []
-    for p in _fact_files(chart_dir):
+    for p in sorted(
+        p for p in Path(chart_dir).glob("*.json") if not p.name.startswith(".")
+    ):
+        if not p.is_file():
+            problems.append(f"{p.name}: not a regular file")
+            continue
         try:
             loaded = json.loads(p.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        except (json.JSONDecodeError, UnicodeDecodeError, RecursionError) as e:
             problems.append(f"invalid JSON in {p.name}: {e}")
+            continue
+        except OSError as e:
+            problems.append(f"unreadable fact file {p.name}: {e}")
             continue
         if not isinstance(loaded, list):
             problems.append(f"{p.name}: top level must be a JSON list of facts")
@@ -194,9 +204,11 @@ def verify_manifest(chart_dir: Path) -> list[str]:
     mpath = chart_dir / MANIFEST_NAME
     if not mpath.exists():
         return [f"chart manifest missing: {mpath}"]
+    if not mpath.is_file():
+        return [f"chart manifest is not a regular file: {mpath}"]
     try:
         manifest = json.loads(mpath.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError, RecursionError) as e:
         return [f"chart manifest unreadable: {e}"]
     if not isinstance(manifest, dict) or not isinstance(manifest.get("files"), dict):
         return ['chart manifest malformed: expected {"files": {...}, "fact_count": N}']
@@ -207,6 +219,16 @@ def verify_manifest(chart_dir: Path) -> list[str]:
         problems.append(f"chart file not in manifest: {name}")
     count = 0
     for name, digest in manifest["files"].items():
+        if (
+            not isinstance(name, str)
+            or "/" in name
+            or "\\" in name
+            or name.startswith(".")
+            or not name.endswith(".json")
+            or not isinstance(digest, str)
+        ):
+            problems.append(f"manifest lists invalid entry: {name!r}")
+            continue
         p = chart_dir / name
         if not p.is_file():
             problems.append(f"manifest lists missing file: {name}")
@@ -216,14 +238,13 @@ def verify_manifest(chart_dir: Path) -> list[str]:
             problems.append(f"manifest hash mismatch on {name}")
         try:
             loaded = json.loads(p.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError):
+        except (json.JSONDecodeError, UnicodeDecodeError, RecursionError):
             continue  # reported by _read_fact_files
         if isinstance(loaded, list):
             count += len(loaded)
-    if count != manifest.get("fact_count"):
-        problems.append(
-            f"manifest fact_count {manifest.get('fact_count')} != actual {count}"
-        )
+    expected = manifest.get("fact_count")
+    if isinstance(expected, bool) or not isinstance(expected, int) or expected != count:
+        problems.append(f"manifest fact_count {expected!r} != actual {count}")
     return problems
 
 
