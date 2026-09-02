@@ -39,7 +39,7 @@ def _anchor_problems(f: dict) -> list[str]:
     h = anchor.get("content_hash")
     if h is None:
         out.append(f"anchor missing content_hash: {who}")
-    elif not isinstance(h, str) or not _SHA256_RE.match(h):
+    elif not isinstance(h, str) or not _SHA256_RE.fullmatch(h):
         out.append(f"anchor content_hash malformed (expected sha256:<64 hex>): {who}")
     if "lines" not in anchor:
         out.append(f"anchor missing lines (use null for a whole-file anchor): {who}")
@@ -61,9 +61,16 @@ def lint_facts(facts: list[dict]) -> list[str]:
     problems: list[str] = []
 
     for f in facts:
-        missing = [k for k in _REQUIRED_FIELDS if not f.get(k)]
+        if not isinstance(f, dict):
+            problems.append(
+                f"fact must be a JSON object, got {type(f).__name__}: {f!r}"
+            )
+            continue
+        missing = [
+            k for k in _REQUIRED_FIELDS if not isinstance(f.get(k), str) or not f[k]
+        ]
         if missing:
-            problems.append(f"fact missing fields {missing}: {f}")
+            problems.append(f"fact missing or non-string fields {missing}: {f}")
         problems += _anchor_problems(f)
     if problems:
         # Structurally invalid facts preclude the semantic lints below (they
