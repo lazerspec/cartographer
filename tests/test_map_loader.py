@@ -318,3 +318,12 @@ def test_lint_rejects_non_object_facts_and_non_string_fields():
             field,
             value,
         )
+
+
+def test_lint_rejects_empty_excerpt_hash():
+    from cartographer.anchor import excerpt_hash
+    from cartographer.map_loader import lint_facts
+
+    f = _anchored_fact()
+    f["anchor"] = dict(f["anchor"], content_hash=excerpt_hash(""))
+    assert any("empty excerpt" in p for p in lint_facts([f]))

@@ -8,11 +8,14 @@ import json
 import re
 from pathlib import Path
 
+from cartographer.anchor import excerpt_hash
+
 PRODUCER_PREDICATES = frozenset({"emits_event", "writes_table", "writes_file"})
 CONSUMER_PREDICATES = frozenset({"consumes_event", "reads_view", "reads_file"})
 _REQUIRED_FIELDS = ("subject", "predicate", "object", "path", "scope", "owner")
 
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_EMPTY_HASH = excerpt_hash("")
 
 
 def _valid_lines(lines: object) -> bool:
@@ -41,6 +44,8 @@ def _anchor_problems(f: dict) -> list[str]:
         out.append(f"anchor missing content_hash: {who}")
     elif not isinstance(h, str) or not _SHA256_RE.fullmatch(h):
         out.append(f"anchor content_hash malformed (expected sha256:<64 hex>): {who}")
+    elif h == _EMPTY_HASH:
+        out.append(f"anchor pins an empty excerpt (nothing to verify): {who}")
     if "lines" not in anchor:
         out.append(f"anchor missing lines (use null for a whole-file anchor): {who}")
     elif anchor["lines"] is not None and not _valid_lines(anchor["lines"]):

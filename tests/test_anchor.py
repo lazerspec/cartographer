@@ -2,8 +2,11 @@
 
 from pathlib import Path
 
+import pytest
+
 from cartographer.anchor import (
     Disposition,
+    _slice,
     dispose,
     excerpt_hash,
     identity,
@@ -12,6 +15,7 @@ from cartographer.anchor import (
     normalize,
     run_ladder,
     verify_anchor,
+    verify_excerpt,
 )
 
 AT = "2026-07-03T00:00:00Z"
@@ -168,3 +172,38 @@ def test_run_ladder_keys_by_identity(tmp_path):
     out = run_ladder(w0, w1, [f], set(), set(), set(), "step-01", AT)
     assert identity(f) in out
     assert isinstance(out[identity(f)], Disposition)
+
+
+def test_slice_rejects_ranges_outside_the_file():
+    three = "l1\nl2\nl3\n"
+    for bad in [(5, 9), (3, 1), (0, 0), (0, 2), (-1, 1), (1, 4)]:
+        with pytest.raises(ValueError):
+            _slice(three, bad)
+    assert _slice(three, (1, 3)) == "l1\nl2\nl3"
+    assert _slice(three, (3, 3)) == "l3"
+
+
+def test_anchor_past_eof_never_verifies(tmp_path):
+    (tmp_path / "a.py").write_text("l1\nl2\nl3\n")
+    with pytest.raises(ValueError):
+        make_code_anchor(tmp_path, "a.py", (5, 9), "r", "t")
+    forged = {
+        "kind": "code",
+        "path": "a.py",
+        "lines": [5, 9],
+        "content_hash": excerpt_hash(""),
+        "revision": "r",
+        "verified_at": "t",
+    }
+    assert verify_excerpt("l1\nl2\nl3\n", forged) is False
+    assert verify_excerpt("COMPLETELY DIFFERENT\nstuff\n", forged) is False
+    assert verify_anchor(tmp_path, forged) is False
+
+
+def test_empty_excerpt_cannot_be_anchored(tmp_path):
+    (tmp_path / "empty.py").write_text("")
+    (tmp_path / "blank.py").write_text("\n\n   \n")
+    with pytest.raises(ValueError):
+        make_code_anchor(tmp_path, "empty.py", None, "r", "t")
+    with pytest.raises(ValueError):
+        make_code_anchor(tmp_path, "blank.py", (1, 2), "r", "t")

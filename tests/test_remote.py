@@ -90,7 +90,9 @@ def test_remote_unverifiable_paths(tmp_path):
     origin = _origin_with_svc_b(tmp_path, "def x():\n    pass\n")
     (origin / "svc-c").mkdir()
     (origin / "svc-c" / "src").mkdir()
-    (origin / "svc-c" / "src" / "x.py").write_text("def x():\n    pass\n")
+    (origin / "svc-c" / "src" / "x.py").write_text(
+        "def x():\n    pass\n    return None\n"
+    )
     f_no_source = fact(origin, "svc-c", "consumes_event", "EventA", "svc-c/src/x.py")
 
     # (a) folder absent from sources entirely
