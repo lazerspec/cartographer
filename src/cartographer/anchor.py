@@ -24,6 +24,11 @@ def excerpt_hash(text: str) -> str:
 def _slice(text: str, lines: tuple[int, int]) -> str:
     body = normalize(text).split("\n")
     lo, hi = lines
+    if lo < 1 or hi < lo or hi > len(body):
+        raise ValueError(
+            f"line range {lo}-{hi} is outside the file ({len(body)} lines after "
+            "normalization)"
+        )
     return "\n".join(body[lo - 1 : hi])
 
 
@@ -32,6 +37,11 @@ def make_code_anchor(
 ) -> dict:
     text = (Path(world) / path).read_text()
     excerpt = text if lines is None else _slice(text, lines)
+    if normalize(excerpt) == "":
+        raise ValueError(
+            f"refusing to anchor an empty excerpt ({path} lines {lines}): "
+            "nothing to pin"
+        )
     return {
         "kind": "code",
         "path": path,
@@ -51,7 +61,12 @@ def make_external_anchor(world: Path, path: str, revision: str, at: str) -> dict
 
 def verify_excerpt(text: str, anchor: dict) -> bool:
     lines = anchor["lines"]
-    excerpt = text if lines is None else _slice(text, (lines[0], lines[1]))
+    try:
+        excerpt = text if lines is None else _slice(text, (lines[0], lines[1]))
+    except ValueError:
+        return False
+    if normalize(excerpt) == "":
+        return False
     return excerpt_hash(excerpt) == anchor["content_hash"]
 
 
