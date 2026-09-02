@@ -338,3 +338,15 @@ def test_drift_template_uses_strict():
 
     text = (files("cartographer") / "templates" / "drift-example.yml").read_text()
     assert "cartographer check map/chart --world . --strict" in text
+
+
+def test_all_drifted_does_not_claim_nothing_was_checked(tmp_path, capsys):
+    world = write_world(tmp_path)
+    chart = write_chart(tmp_path, world)
+    seal(chart)
+    for rel in ("svc-a/src/publish.py", "svc-b/src/consume.py"):
+        (world / rel).write_text("completely rewritten\n")
+    assert check(chart, world) == 1
+    out = capsys.readouterr().out
+    assert "2 DRIFTED" in out
+    assert "nothing could be checked" not in out

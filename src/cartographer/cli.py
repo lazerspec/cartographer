@@ -96,7 +96,7 @@ def check(
         )
         for f in _by_fact_order(unverifiable_facts):
             print("  " + _fact_line(f))
-    if facts and n_verified == 0:
+    if facts and n_verified == 0 and not drifted_facts:
         print(
             "0 facts verified: nothing could be checked (wrong --world, or no "
             "checkout and no sources.json entry). Treating as failure."
