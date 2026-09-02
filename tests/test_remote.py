@@ -306,3 +306,59 @@ def test_fetch_url_encodes_path(monkeypatch):
     assert fetch_remote_file({"repo": "o/r"}, "a b/c#d.py") == "x"
     assert "repos/o/r/contents/a%20b/c%23d.py?ref=main" in seen[0][2]
     assert fetch_remote_file({"repo": "o/r"}, "") is None
+    seen.clear()
+    fetch_remote_file({"repo": "o/r", "branch": "release/1.2"}, "a.py")
+    assert "?ref=release%2F1.2" in seen[0][2]
+
+
+def test_load_sources_unreadable_file_warns_not_raises(tmp_path, capsys):
+    from cartographer.remote import load_sources
+
+    (tmp_path / "sources.json").mkdir()
+    assert load_sources(tmp_path) == {}
+    assert "not a regular file" in capsys.readouterr().err
+    (tmp_path / "sources.json").rmdir()
+    (tmp_path / "sources.json").write_bytes(b"\xff\xfe\x00")
+    assert load_sources(tmp_path) == {}
+    assert "ignoring all entries" in capsys.readouterr().err
+
+
+def test_load_sources_validates_repo_branch_and_key(tmp_path, capsys):
+    from cartographer.remote import load_sources
+
+    entries = {
+        "ok": {"repo": "acme/svc", "branch": "release/1.2"},
+        "empty_repo": {"repo": ""},
+        "url_repo": {"repo": "https://github.com/acme/svc"},
+        "query_repo": {"repo": "acme/svc?x=1"},
+        "dotdot_repo": {"repo": "../../user"},
+        "null_branch": {"repo": "acme/svc", "branch": None},
+        "empty_branch": {"repo": "acme/svc", "branch": ""},
+        "amp_branch": {"repo": "acme/svc", "branch": "main&x=1"},
+        "svc/src": {"repo": "acme/svc"},
+        " svc": {"repo": "acme/svc"},
+        "": {"repo": "acme/svc"},
+        ".": {"repo": "acme/svc"},
+    }
+    (tmp_path / "sources.json").write_text(json.dumps(entries))
+    assert load_sources(tmp_path) == {
+        "ok": {"repo": "acme/svc", "branch": "release/1.2"}
+    }
+    err = capsys.readouterr().err
+    for key in entries:
+        if key != "ok":
+            assert repr(key) in err, key
+    assert err.count("warning") == len(entries) - 1
+
+
+def test_check_survives_unreadable_sources_json(tmp_path, capsys):
+    from cartographer.cli import check
+
+    world = write_world(tmp_path)
+    chart = write_chart(tmp_path, world)
+    from cartographer.cli import seal
+
+    seal(chart)
+    (chart.parent / "sources.json").mkdir()
+    assert check(chart, world) == 0  # both services are local; sources is irrelevant
+    assert "not a regular file" in capsys.readouterr().err
