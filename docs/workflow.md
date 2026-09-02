@@ -17,7 +17,9 @@ or what does the typing.
 
 ## Tickets
 
-Tickets live on the board (Linear). A ticket moves through these states:
+Tickets live on the maintainer's board (Linear, private). Outside contributors
+open a GitHub Issue; the maintainer mirrors it onto the board. A ticket moves
+through these states:
 
 1. **Proposed.** Anyone, including a reviewing agent, can propose one. It
    must state the claim, the expected versus observed behaviour, and where
