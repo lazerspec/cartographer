@@ -5,11 +5,50 @@
 # never silently answer.
 import hashlib
 import json
+import re
 from pathlib import Path
 
 PRODUCER_PREDICATES = frozenset({"emits_event", "writes_table", "writes_file"})
 CONSUMER_PREDICATES = frozenset({"consumes_event", "reads_view", "reads_file"})
 _REQUIRED_FIELDS = ("subject", "predicate", "object", "path", "scope", "owner")
+
+_SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+def _valid_lines(lines: object) -> bool:
+    return (
+        isinstance(lines, list)
+        and len(lines) == 2
+        and all(isinstance(x, int) and not isinstance(x, bool) for x in lines)
+        and 1 <= lines[0] <= lines[1]
+    )
+
+
+def _anchor_problems(f: dict) -> list[str]:
+    """Structural checks on a fact's anchor. Serving code indexes
+    anchor["path"], anchor["lines"] and anchor["content_hash"] directly, so
+    a fact that fails here would crash a tool call instead of failing
+    closed with a lint verdict."""
+    who = f.get("subject", "?")
+    anchor = f.get("anchor")
+    if not isinstance(anchor, dict):
+        return [f"fact missing anchor: {who}"]
+    out: list[str] = []
+    if not isinstance(anchor.get("path"), str) or not anchor.get("path"):
+        out.append(f"anchor missing path: {who}")
+    h = anchor.get("content_hash")
+    if h is None:
+        out.append(f"anchor missing content_hash: {who}")
+    elif not isinstance(h, str) or not _SHA256_RE.fullmatch(h):
+        out.append(f"anchor content_hash malformed (expected sha256:<64 hex>): {who}")
+    if "lines" not in anchor:
+        out.append(f"anchor missing lines (use null for a whole-file anchor): {who}")
+    elif anchor["lines"] is not None and not _valid_lines(anchor["lines"]):
+        out.append(
+            f"anchor lines must be [lo, hi] with 1 <= lo <= hi, "
+            f"got {anchor['lines']!r}: {who}"
+        )
+    return out
 
 
 class LintError(Exception):
@@ -22,9 +61,17 @@ def lint_facts(facts: list[dict]) -> list[str]:
     problems: list[str] = []
 
     for f in facts:
-        missing = [k for k in _REQUIRED_FIELDS if not f.get(k)]
+        if not isinstance(f, dict):
+            problems.append(
+                f"fact must be a JSON object, got {type(f).__name__}: {f!r}"
+            )
+            continue
+        missing = [
+            k for k in _REQUIRED_FIELDS if not isinstance(f.get(k), str) or not f[k]
+        ]
         if missing:
-            problems.append(f"fact missing fields {missing}: {f}")
+            problems.append(f"fact missing or non-string fields {missing}: {f}")
+        problems += _anchor_problems(f)
     if problems:
         # Structurally invalid facts preclude the semantic lints below (they
         # index required keys directly). Fail closed with what we know.
