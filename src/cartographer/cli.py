@@ -57,18 +57,26 @@ def check(
 ) -> int:
     """Verify every fact's anchor against the live code, or (when the
     service is not checked out) against the git host via sources.json.
-    Read-only. Exit codes: 0 clean, 1 drifted facts need review (or, with
-    --strict, any unverifiable fact), 2 chart refused."""
+    Read-only. Exit codes: 0 clean, 1 drifted facts need review (or zero
+    facts verified, or with --strict any unverifiable fact), 2 chart
+    refused or world directory missing."""
     from cartographer.mcp_server import _split
 
     try:
         facts = load_sealed_chart(Path(chart_dir))
     except LintError as e:
-        print("CHART REFUSED (fail-closed):", file=sys.stderr)
+        print(
+            "CHART REFUSED (fail-closed). Fix the problems below, then run "
+            "`cartographer seal <chart>`:",
+            file=sys.stderr,
+        )
         for problem in e.problems:
             print(f"  {problem}", file=sys.stderr)
         return 2
     world = Path(world)
+    if not world.is_dir():
+        print(f"world directory not found: {world}", file=sys.stderr)
+        return 2
     status = chart_status(Path(chart_dir), world, facts, fetch=fetch)
     drifted, unverifiable = _split(world, status, facts)
     drifted_facts = [f for f in facts if anchor_key(f) in drifted]
@@ -88,6 +96,12 @@ def check(
         )
         for f in _by_fact_order(unverifiable_facts):
             print("  " + _fact_line(f))
+    if facts and n_verified == 0 and not drifted_facts:
+        print(
+            "0 facts verified: nothing could be checked (wrong --world, or no "
+            "checkout and no sources.json entry). Treating as failure."
+        )
+        return 1
     if drifted_facts:
         return 1
     if strict and unverifiable_facts:

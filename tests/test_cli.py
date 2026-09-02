@@ -292,3 +292,61 @@ def test_init_mcp_json_uses_pull():
     text = resources.files("cartographer").joinpath("templates/mcp.json").read_text()
     args = json.loads(text)["mcpServers"]["cartographer"]["args"]
     assert args[:2] == ["serve", "--pull"]
+
+
+def test_check_missing_world_exit_2(tmp_path, capsys):
+    world = write_world(tmp_path)
+    chart = write_chart(tmp_path, world)
+    seal(chart)
+    assert check(chart, tmp_path / "does-not-exist") == 2
+    err = capsys.readouterr().err
+    assert "world directory not found" in err
+    assert main(["check", str(chart), "--world", str(tmp_path / "nope")]) == 2
+
+
+def test_check_zero_verified_is_failure(tmp_path, capsys):
+    world = write_world(tmp_path)
+    chart = write_chart(tmp_path, world)
+    seal(chart)
+    empty_world = tmp_path / "empty"
+    empty_world.mkdir()
+
+    def fetch_never(source, path_in_repo):
+        raise AssertionError("no sources.json: fetch must not be called")
+
+    assert check(chart, empty_world, fetch=fetch_never) == 1
+    out = capsys.readouterr().out
+    assert "verified 0/2" in out
+    assert "0 facts verified" in out
+    # a genuinely empty chart is not a failure: nothing to verify, nothing wrong
+    assert check(chart, world) == 0
+
+
+def test_check_refused_message_names_seal(tmp_path, capsys):
+    world = write_world(tmp_path)
+    chart = write_chart(tmp_path, world)
+    seal(chart)
+    facts = json.loads((chart / "flow.json").read_text())
+    facts[0]["object"] = "EventZ"
+    (chart / "flow.json").write_text(json.dumps(facts, indent=1))
+    assert check(chart, world) == 2
+    assert "cartographer seal" in capsys.readouterr().err
+
+
+def test_drift_template_uses_strict():
+    from importlib.resources import files
+
+    text = (files("cartographer") / "templates" / "drift-example.yml").read_text()
+    assert "cartographer check map/chart --world . --strict" in text
+
+
+def test_all_drifted_does_not_claim_nothing_was_checked(tmp_path, capsys):
+    world = write_world(tmp_path)
+    chart = write_chart(tmp_path, world)
+    seal(chart)
+    for rel in ("svc-a/src/publish.py", "svc-b/src/consume.py"):
+        (world / rel).write_text("completely rewritten\n")
+    assert check(chart, world) == 1
+    out = capsys.readouterr().out
+    assert "2 DRIFTED" in out
+    assert "nothing could be checked" not in out
