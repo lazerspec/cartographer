@@ -4,15 +4,26 @@ import pytest
 
 from cartographer.map_loader import LintError, lint_facts, load_sealed_chart
 
+_HASH = "sha256:" + "0" * 64
+
 
 def _fact(subject, predicate, object_, **kw):
+    path = kw.get("path", "x/y.py")
     return {
         "subject": subject,
         "predicate": predicate,
         "object": object_,
-        "path": kw.get("path", "x/y.py"),
+        "path": path,
         "scope": kw.get("scope", "x"),
         "owner": kw.get("owner", "x-team"),
+        "anchor": {
+            "kind": "code",
+            "path": path,
+            "lines": [1, 1],
+            "content_hash": _HASH,
+            "revision": "r0",
+            "verified_at": "2026-01-01T00:00:00Z",
+        },
         **{k: v for k, v in kw.items() if k not in ("path", "scope", "owner")},
     }
 
@@ -94,13 +105,27 @@ def _anchored_fact(**over):
             "kind": "code",
             "path": "r/f.py",
             "lines": [1, 1],
-            "content_hash": "sha256:0",
+            "content_hash": _HASH,
             "revision": "step-00",
             "verified_at": "2026-07-03T00:00:00Z",
         },
     }
     f.update(over)
     return f
+
+
+def _write_manifest(chart_dir):
+    import hashlib as _hashlib
+    import json as _json
+
+    files = {}
+    count = 0
+    for p in sorted(chart_dir.glob("*.json")):
+        files[p.name] = "sha256:" + _hashlib.sha256(p.read_bytes()).hexdigest()
+        count += len(_json.loads(p.read_text()))
+    (chart_dir / "chart.manifest").write_text(
+        _json.dumps({"files": files, "fact_count": count})
+    )
 
 
 def test_anchor_path_mismatch_is_a_lint():
@@ -207,3 +232,89 @@ def test_load_sealed_chart_fails_closed_on_manifest_absence(tmp_path):
     with pytest.raises(LintError) as exc:
         load_sealed_chart(chart)
     assert any("manifest missing" in p for p in exc.value.problems)
+
+
+def test_lint_requires_well_formed_anchor():
+    from cartographer.map_loader import lint_facts
+
+    no_anchor = _anchored_fact()
+    del no_anchor["anchor"]
+    assert any("fact missing anchor" in p for p in lint_facts([no_anchor]))
+
+    not_dict = _anchored_fact(anchor="r/f.py")
+    assert any("fact missing anchor" in p for p in lint_facts([not_dict]))
+
+    no_hash = _anchored_fact()
+    del no_hash["anchor"]["content_hash"]
+    assert any("anchor missing content_hash" in p for p in lint_facts([no_hash]))
+
+    bad_hash = _anchored_fact()
+    bad_hash["anchor"] = dict(bad_hash["anchor"], content_hash="sha256:0")
+    assert any("content_hash malformed" in p for p in lint_facts([bad_hash]))
+
+    no_lines = _anchored_fact()
+    del no_lines["anchor"]["lines"]
+    assert any("anchor missing lines" in p for p in lint_facts([no_lines]))
+
+    for bad in ([1], [0, 2], [3, 1], [1, "2"], [True, 1], "1-2", [1, 2, 3]):
+        f = _anchored_fact()
+        f["anchor"] = dict(f["anchor"], lines=bad)
+        assert any("anchor lines must be [lo, hi]" in p for p in lint_facts([f])), bad
+
+    whole_file = _anchored_fact()
+    whole_file["anchor"] = dict(whole_file["anchor"], lines=None)
+    assert lint_facts([whole_file]) == []
+    assert lint_facts([_anchored_fact()]) == []
+
+    for bad_path in ("", 5, None):
+        f = _anchored_fact()
+        f["anchor"] = dict(f["anchor"], path=bad_path)
+        assert any("anchor missing path" in p for p in lint_facts([f])), bad_path
+
+    int_hash = _anchored_fact()
+    int_hash["anchor"] = dict(int_hash["anchor"], content_hash=12345)
+    assert any("content_hash malformed" in p for p in lint_facts([int_hash]))
+
+    nl_hash = _anchored_fact()
+    nl_hash["anchor"] = dict(nl_hash["anchor"], content_hash=_HASH + "\n")
+    assert any("content_hash malformed" in p for p in lint_facts([nl_hash]))
+
+
+def test_load_sealed_chart_refuses_unanchored_fact(tmp_path):
+    import json as _json
+
+    from cartographer.map_loader import LintError, load_sealed_chart
+
+    f = _anchored_fact()
+    del f["anchor"]
+    (tmp_path / "s.json").write_text(_json.dumps([f]))
+    _write_manifest(tmp_path)
+    with pytest.raises(LintError) as exc:
+        load_sealed_chart(tmp_path)
+    assert any("fact missing anchor" in p for p in exc.value.problems)
+
+
+def test_lint_rejects_non_object_facts_and_non_string_fields():
+    from cartographer.map_loader import lint_facts
+
+    for bad in (None, "x", 1, [], [_anchored_fact()]):
+        problems = lint_facts([bad])
+        assert any("fact must be a JSON object" in p for p in problems), bad
+    mixed = lint_facts([_anchored_fact(), None])
+    assert any("fact must be a JSON object" in p for p in mixed)
+
+    for field, value in (
+        ("subject", True),
+        ("scope", 1),
+        ("path", 5),
+        ("subject", ["a"]),
+        ("predicate", 7),
+    ):
+        f = _anchored_fact(**{field: value})
+        if field == "path":
+            f["anchor"] = dict(f["anchor"], path=value)
+        problems = lint_facts([f])
+        assert any("non-string fields" in p and field in p for p in problems), (
+            field,
+            value,
+        )
