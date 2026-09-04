@@ -163,6 +163,54 @@ def test_rename_follow_ignores_unreadable_previous_file(tmp_path):
     assert not any("renamed" in r for r in d.reasons)
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
+def test_rename_follow_ignores_mode000_previous_file(tmp_path):
+    seed = _world(tmp_path, "seed", {"svc/old.py": "a = 1\n"})
+    f = _fact(make_code_anchor(seed, "svc/old.py", (1, 1), "step-00", AT))
+    w0 = _world(tmp_path, "w0", {"svc/old.py": "a = 1\n"})
+    os.chmod(w0 / "svc" / "old.py", 0)
+    w1 = _world(tmp_path, "w1", {"svc/empty.py": ""})
+    try:
+        d = dispose(w0, w1, f, set(), {"svc/old.py"}, {"svc/empty.py"}, "step-01", AT)
+    finally:
+        os.chmod(w0 / "svc" / "old.py", 0o644)
+    assert d.tier != "L2"
+    assert not any("renamed" in r for r in d.reasons)
+
+
+def test_rename_follow_needs_exactly_one_identical_readable_twin(tmp_path):
+    w0 = _world(tmp_path, "w0", {"svc/old.py": "a = 1\n"})
+    f = _fact(make_code_anchor(w0, "svc/old.py", (1, 1), "step-00", AT))
+    # a different file and a directory are not twins
+    w1 = _world(tmp_path, "w1", {"svc/other.py": "b = 2\n"})
+    (w1 / "svc" / "dirtwin.py").mkdir()
+    d = dispose(
+        w0,
+        w1,
+        f,
+        set(),
+        {"svc/old.py"},
+        {"svc/other.py", "svc/dirtwin.py"},
+        "step-01",
+        AT,
+    )
+    assert d.tier != "L2"
+    assert not any("renamed" in r for r in d.reasons)
+    # two identical twins are ambiguous, never a rename
+    w2 = _world(tmp_path, "w2", {"svc/a.py": "a = 1\n", "svc/b.py": "a = 1\n"})
+    d = dispose(
+        w0, w2, f, set(), {"svc/old.py"}, {"svc/a.py", "svc/b.py"}, "step-01", AT
+    )
+    assert d.tier != "L2"
+    # exactly one identical readable twin is followed
+    w3 = _world(tmp_path, "w3", {"svc/new.py": "a = 1\n", "svc/other.py": "b = 2\n"})
+    d = dispose(
+        w0, w3, f, set(), {"svc/old.py"}, {"svc/new.py", "svc/other.py"}, "step-01", AT
+    )
+    assert d.tier == "L2"
+    assert any("renamed to svc/new.py" in r for r in d.reasons)
+
+
 def test_deleted_without_twin_is_l4(tmp_path):
     w0 = _world(tmp_path, "w0", {"r/old.py": "a: 1\n"})
     w1 = _world(tmp_path, "w1", {"r/keep.py": "other\n"})
