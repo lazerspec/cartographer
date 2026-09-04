@@ -42,10 +42,13 @@ def seal(chart_dir: Path) -> str:
         raise SystemExit(
             "refusing to seal a chart that fails lint:\n" + "\n".join(problems)
         )
+    fact_files = _fact_files(chart_dir)
+    if not fact_files:
+        raise SystemExit(f"nothing to seal: no *.json fact files in {chart_dir}")
     try:
         files = {
             p.name: "sha256:" + hashlib.sha256(p.read_bytes()).hexdigest()
-            for p in _fact_files(chart_dir)
+            for p in fact_files
         }
     except OSError as e:
         raise SystemExit(f"cannot read chart file: {e}") from e
