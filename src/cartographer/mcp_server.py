@@ -18,10 +18,14 @@ from cartographer.chart_context import _fact_line, context_hash, render_core_con
 from cartographer.map_loader import load_sealed_chart
 from cartographer.remote import (
     DRIFTED,
+    OK,
     UNVERIFIABLE,
+    absent_file_status,
     anchor_key,
-    chart_status,
     fetch_remote_file,
+    load_sources,
+    never_fetch,
+    remote_snapshot,
 )
 
 DISCLAIMER = (
@@ -33,29 +37,39 @@ UNVERIFIED_MARK = " [UNVERIFIED: no local checkout, remote unreachable]"
 
 
 def _split(
-    world: Path, status: dict, facts: list[dict]
+    world: Path, status: dict, facts: list[dict], sources: dict | None = None
 ) -> tuple[set[tuple], set[tuple]]:
-    """Per served fact: the FILE's presence decides local vs snapshot (a
-    file gone from a partially-checked-out folder must not shadow a
-    remote source). A local file re-verifies live (as 0.2.0); with no
-    local file, the fact's status from the startup snapshot (keyed by
-    anchor, not fact identity, so a re-anchored fact misses and defaults
-    to unverifiable) decides drifted vs unverifiable."""
+    """Per served fact: a pinned file present on disk re-verifies live; a
+    file absent on disk uses the startup snapshot's remote verdict when
+    there is one, and otherwise the same offline rule `check` applies when
+    a fetch fails. Server and CLI therefore never disagree on the same
+    tree."""
     drifted: set[tuple] = set()
     unverifiable: set[tuple] = set()
+    sources = {} if sources is None else sources
     for f in facts:
         anchor = f["anchor"]
         akey = anchor_key(f)
         if (Path(world) / anchor["path"]).exists():
             if not verify_anchor(world, anchor):
                 drifted.add(akey)
-        else:
-            s = status.get(akey, UNVERIFIABLE)
-            if s == DRIFTED:
-                drifted.add(akey)
-            elif s == UNVERIFIABLE:
-                unverifiable.add(akey)
+            continue
+        s = status.get(akey)
+        if s not in (OK, DRIFTED, UNVERIFIABLE):
+            s = absent_file_status(world, sources, f, fetch=never_fetch)
+        if s == DRIFTED:
+            drifted.add(akey)
+        elif s == UNVERIFIABLE:
+            unverifiable.add(akey)
     return drifted, unverifiable
+
+
+def _sources(chart_dir: Path, sources: dict | None) -> dict:
+    return (
+        sources
+        if sources is not None
+        else load_sources(Path(chart_dir).resolve().parent)
+    )
 
 
 def _banner(n_drifted: int, n_total: int) -> str:
@@ -109,9 +123,11 @@ def _core(facts: list[dict]) -> list[dict]:
     return [f for f in facts if f.get("tier") != "derived"]
 
 
-def chart_index(chart_dir: Path, world: Path, status: dict) -> str:
+def chart_index(
+    chart_dir: Path, world: Path, status: dict, sources: dict | None = None
+) -> str:
     facts = _core(load_sealed_chart(chart_dir))
-    drifted, unverifiable = _split(world, status, facts)
+    drifted, unverifiable = _split(world, status, facts, _sources(chart_dir, sources))
     by_scope: dict[str, list[dict]] = {}
     for f in facts:
         by_scope.setdefault(f["scope"], []).append(f)
@@ -135,13 +151,15 @@ def chart_index(chart_dir: Path, world: Path, status: dict) -> str:
     return out
 
 
-def get_scope_facts(chart_dir: Path, world: Path, status: dict, scope: str) -> str:
+def get_scope_facts(
+    chart_dir: Path, world: Path, status: dict, scope: str, sources: dict | None = None
+) -> str:
     facts = _core(load_sealed_chart(chart_dir))
     hits = [f for f in facts if f["scope"] == scope]
     if not hits:
         known = ", ".join(sorted({f["scope"] for f in facts}))
         return f"no facts for scope {scope!r}; known scopes: {known}"
-    drifted, unverifiable = _split(world, status, hits)
+    drifted, unverifiable = _split(world, status, hits, _sources(chart_dir, sources))
     n_drifted, n_unverifiable = _fact_counts(hits, drifted, unverifiable)
     out = "\n".join(_sorted_lines(hits, drifted, unverifiable))
     if n_unverifiable:
@@ -151,13 +169,15 @@ def get_scope_facts(chart_dir: Path, world: Path, status: dict, scope: str) -> s
     return out
 
 
-def who_mentions(chart_dir: Path, world: Path, status: dict, token: str) -> str:
+def who_mentions(
+    chart_dir: Path, world: Path, status: dict, token: str, sources: dict | None = None
+) -> str:
     facts = _core(load_sealed_chart(chart_dir))
     t = token.lower()
     hits = [f for f in facts if t in f["subject"].lower() or t in f["object"].lower()]
     if not hits:
         return f"no fact mentions {token!r} (literal string match over subject/object)"
-    drifted, unverifiable = _split(world, status, hits)
+    drifted, unverifiable = _split(world, status, hits, _sources(chart_dir, sources))
     n_drifted, n_unverifiable = _fact_counts(hits, drifted, unverifiable)
     out = "\n".join(_sorted_lines(hits, drifted, unverifiable))
     if n_unverifiable:
@@ -170,13 +190,15 @@ def who_mentions(chart_dir: Path, world: Path, status: dict, token: str) -> str:
 DERIVED_CAVEAT = "DERIVED TIER (statically re-derivable; served on request only)"
 
 
-def get_derived_facts(chart_dir: Path, world: Path, status: dict, scope: str) -> str:
+def get_derived_facts(
+    chart_dir: Path, world: Path, status: dict, scope: str, sources: dict | None = None
+) -> str:
     facts = [f for f in load_sealed_chart(chart_dir) if f.get("tier") == "derived"]
     hits = [f for f in facts if f["scope"] == scope]
     if not hits:
         known = ", ".join(sorted({f["scope"] for f in facts})) or "(none)"
         return f"no derived facts for scope {scope!r}; scopes with derived: {known}"
-    drifted, unverifiable = _split(world, status, hits)
+    drifted, unverifiable = _split(world, status, hits, _sources(chart_dir, sources))
     n_drifted, n_unverifiable = _fact_counts(hits, drifted, unverifiable)
     out = DERIVED_CAVEAT + "\n" + "\n".join(_sorted_lines(hits, drifted, unverifiable))
     if n_unverifiable:
@@ -187,7 +209,11 @@ def get_derived_facts(chart_dir: Path, world: Path, status: dict, scope: str) ->
 
 
 def staleness_check(
-    chart_dir: Path, world: Path, status: dict, scope: str | None = None
+    chart_dir: Path,
+    world: Path,
+    status: dict,
+    scope: str | None = None,
+    sources: dict | None = None,
 ) -> str:
     """Three-state, consistent with the serving tools: a local file
     re-verifies live; with no local file, the startup snapshot decides
@@ -195,7 +221,7 @@ def staleness_check(
     facts = load_sealed_chart(chart_dir)
     if scope is not None:
         facts = [f for f in facts if f["scope"] == scope]
-    drifted, unverifiable = _split(world, status, facts)
+    drifted, unverifiable = _split(world, status, facts, _sources(chart_dir, sources))
     n_drifted, n_unverifiable = _fact_counts(facts, drifted, unverifiable)
     n_verified = len(facts) - n_drifted - n_unverifiable
     out = f"verified {n_verified}/{len(facts)} anchors against {world}"
@@ -217,10 +243,13 @@ def staleness_check(
 
 
 def compute_status(chart_dir: Path, world: Path, fetch=fetch_remote_file) -> dict:
-    """Startup verification snapshot. On ANY failure returns {} so remote
-    facts default to unverifiable; serving stays fail-closed per call."""
+    """Startup snapshot of REMOTE verdicts (see remote_snapshot). On ANY
+    failure returns {} so absent files fall to the offline rule; serving
+    stays fail-closed per call."""
     try:
-        return chart_status(chart_dir, world, load_sealed_chart(chart_dir), fetch=fetch)
+        return remote_snapshot(
+            chart_dir, world, load_sealed_chart(chart_dir), fetch=fetch
+        )
     except Exception:  # noqa: BLE001
         return {}
 
@@ -229,6 +258,7 @@ def build_server(chart_dir: Path, world: Path, fetch=fetch_remote_file):
     from mcp.server.fastmcp import FastMCP
 
     status = compute_status(chart_dir, world, fetch=fetch)
+    sources = load_sources(Path(chart_dir).resolve().parent)
 
     app = FastMCP("cartographer")
 
@@ -241,7 +271,7 @@ def build_server(chart_dir: Path, world: Path, fetch=fetch_remote_file):
         ),
     )
     def _index() -> str:
-        return chart_index(chart_dir, world, status)
+        return chart_index(chart_dir, world, status, sources=sources)
 
     @app.tool(
         name="get_scope_facts",
@@ -252,7 +282,7 @@ def build_server(chart_dir: Path, world: Path, fetch=fetch_remote_file):
         ),
     )
     def _scope(scope: str) -> str:
-        return get_scope_facts(chart_dir, world, status, scope)
+        return get_scope_facts(chart_dir, world, status, scope, sources=sources)
 
     @app.tool(
         name="who_mentions",
@@ -263,7 +293,7 @@ def build_server(chart_dir: Path, world: Path, fetch=fetch_remote_file):
         ),
     )
     def _mentions(token: str) -> str:
-        return who_mentions(chart_dir, world, status, token)
+        return who_mentions(chart_dir, world, status, token, sources=sources)
 
     @app.tool(
         name="staleness_check",
@@ -273,7 +303,7 @@ def build_server(chart_dir: Path, world: Path, fetch=fetch_remote_file):
         ),
     )
     def _staleness(scope: str | None = None) -> str:
-        return staleness_check(chart_dir, world, status, scope)
+        return staleness_check(chart_dir, world, status, scope, sources=sources)
 
     @app.tool(
         name="get_derived_facts",
@@ -284,7 +314,7 @@ def build_server(chart_dir: Path, world: Path, fetch=fetch_remote_file):
         ),
     )
     def _derived(scope: str) -> str:
-        return get_derived_facts(chart_dir, world, status, scope)
+        return get_derived_facts(chart_dir, world, status, scope, sources=sources)
 
     return app
 

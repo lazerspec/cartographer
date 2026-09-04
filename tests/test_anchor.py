@@ -1,5 +1,7 @@
 """Anchor schema + ladder. All key-free."""
 
+import os
+import threading
 from pathlib import Path
 
 import pytest
@@ -13,6 +15,7 @@ from cartographer.anchor import (
     make_code_anchor,
     make_external_anchor,
     normalize,
+    read_pinned_text,
     run_ladder,
     verify_anchor,
     verify_excerpt,
@@ -149,6 +152,65 @@ def test_rename_follow_evolved_excerpt_is_l3_carrying_twin(tmp_path):
     assert d.relocate_to == "r/new.py"
 
 
+def test_rename_follow_ignores_unreadable_previous_file(tmp_path):
+    seed = _world(tmp_path, "seed", {"svc/old.py": "a = 1\n"})
+    f = _fact(make_code_anchor(seed, "svc/old.py", (1, 1), "step-00", AT))
+    w0 = tmp_path / "w0"
+    (w0 / "svc" / "old.py").mkdir(parents=True)
+    w1 = _world(tmp_path, "w1", {"svc/empty.py": ""})
+    d = dispose(w0, w1, f, set(), {"svc/old.py"}, {"svc/empty.py"}, "step-01", AT)
+    assert d.tier != "L2"
+    assert not any("renamed" in r for r in d.reasons)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
+def test_rename_follow_ignores_mode000_previous_file(tmp_path):
+    seed = _world(tmp_path, "seed", {"svc/old.py": "a = 1\n"})
+    f = _fact(make_code_anchor(seed, "svc/old.py", (1, 1), "step-00", AT))
+    w0 = _world(tmp_path, "w0", {"svc/old.py": "a = 1\n"})
+    os.chmod(w0 / "svc" / "old.py", 0)
+    w1 = _world(tmp_path, "w1", {"svc/empty.py": ""})
+    try:
+        d = dispose(w0, w1, f, set(), {"svc/old.py"}, {"svc/empty.py"}, "step-01", AT)
+    finally:
+        os.chmod(w0 / "svc" / "old.py", 0o644)
+    assert d.tier != "L2"
+    assert not any("renamed" in r for r in d.reasons)
+
+
+def test_rename_follow_needs_exactly_one_identical_readable_twin(tmp_path):
+    w0 = _world(tmp_path, "w0", {"svc/old.py": "a = 1\n"})
+    f = _fact(make_code_anchor(w0, "svc/old.py", (1, 1), "step-00", AT))
+    # a different file and a directory are not twins
+    w1 = _world(tmp_path, "w1", {"svc/other.py": "b = 2\n"})
+    (w1 / "svc" / "dirtwin.py").mkdir()
+    d = dispose(
+        w0,
+        w1,
+        f,
+        set(),
+        {"svc/old.py"},
+        {"svc/other.py", "svc/dirtwin.py"},
+        "step-01",
+        AT,
+    )
+    assert d.tier != "L2"
+    assert not any("renamed" in r for r in d.reasons)
+    # two identical twins are ambiguous, never a rename
+    w2 = _world(tmp_path, "w2", {"svc/a.py": "a = 1\n", "svc/b.py": "a = 1\n"})
+    d = dispose(
+        w0, w2, f, set(), {"svc/old.py"}, {"svc/a.py", "svc/b.py"}, "step-01", AT
+    )
+    assert d.tier != "L2"
+    # exactly one identical readable twin is followed
+    w3 = _world(tmp_path, "w3", {"svc/new.py": "a = 1\n", "svc/other.py": "b = 2\n"})
+    d = dispose(
+        w0, w3, f, set(), {"svc/old.py"}, {"svc/new.py", "svc/other.py"}, "step-01", AT
+    )
+    assert d.tier == "L2"
+    assert any("renamed to svc/new.py" in r for r in d.reasons)
+
+
 def test_deleted_without_twin_is_l4(tmp_path):
     w0 = _world(tmp_path, "w0", {"r/old.py": "a: 1\n"})
     w1 = _world(tmp_path, "w1", {"r/keep.py": "other\n"})
@@ -198,6 +260,41 @@ def test_anchor_past_eof_never_verifies(tmp_path):
     assert verify_excerpt("l1\nl2\nl3\n", forged) is False
     assert verify_excerpt("COMPLETELY DIFFERENT\nstuff\n", forged) is False
     assert verify_anchor(tmp_path, forged) is False
+
+
+def test_read_pinned_text_handles_dir_and_bytes(tmp_path):
+    (tmp_path / "d").mkdir()
+    assert read_pinned_text(tmp_path / "d") is None
+    assert read_pinned_text(tmp_path / "missing") is None
+    (tmp_path / "bin.py").write_bytes(b"\xff\xfe\x00bad bytes\n")
+    text = read_pinned_text(tmp_path / "bin.py")
+    assert text is not None
+    assert excerpt_hash(text).startswith("sha256:")  # hashing surrogates never raises
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="platform has no FIFOs")
+def test_read_pinned_text_returns_none_for_fifo_without_blocking(tmp_path):
+    fifo = tmp_path / "a.py"
+    os.mkfifo(fifo)
+    result: list = []
+    t = threading.Thread(
+        target=lambda: result.append(read_pinned_text(fifo)), daemon=True
+    )
+    t.start()
+    t.join(timeout=2)
+    assert not t.is_alive(), "read_pinned_text blocked on a FIFO"
+    assert result == [None]
+
+
+def test_verify_anchor_false_for_dir_and_non_utf8(tmp_path):
+    (tmp_path / "a.py").write_text("l1\nl2\n")
+    a = make_code_anchor(tmp_path, "a.py", (1, 2), "r", "t")
+    (tmp_path / "a.py").unlink()
+    (tmp_path / "a.py").mkdir()
+    assert verify_anchor(tmp_path, a) is False
+    (tmp_path / "a.py").rmdir()
+    (tmp_path / "a.py").write_bytes(b"\xff\xfe\x00")
+    assert verify_anchor(tmp_path, a) is False
 
 
 def test_empty_excerpt_cannot_be_anchored(tmp_path):

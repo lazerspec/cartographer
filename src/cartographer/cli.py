@@ -21,7 +21,12 @@ from cartographer.map_loader import (
     lint_facts,
     load_sealed_chart,
 )
-from cartographer.remote import anchor_key, chart_status, fetch_remote_file
+from cartographer.remote import (
+    anchor_key,
+    chart_status,
+    fetch_remote_file,
+    load_sources,
+)
 
 
 def seal(chart_dir: Path) -> str:
@@ -85,7 +90,9 @@ def check(
         print(f"world directory not found: {world}", file=sys.stderr)
         return 2
     status = chart_status(Path(chart_dir), world, facts, fetch=fetch)
-    drifted, unverifiable = _split(world, status, facts)
+    drifted, unverifiable = _split(
+        world, status, facts, load_sources(Path(chart_dir).resolve().parent)
+    )
     drifted_facts = [f for f in facts if anchor_key(f) in drifted]
     unverifiable_facts = [f for f in facts if anchor_key(f) in unverifiable]
     n_verified = len(facts) - len(drifted_facts) - len(unverifiable_facts)
@@ -191,7 +198,9 @@ def startup_staleness_notice(chart: Path, world: Path) -> None:
         world_p = Path(world)
         facts = load_sealed_chart(chart_p)
         status = chart_status(chart_p, world_p, facts)
-        drifted, unverifiable = _split(world_p, status, facts)
+        drifted, unverifiable = _split(
+            world_p, status, facts, load_sources(chart_p.resolve().parent)
+        )
         if drifted:
             print(_banner(len(drifted), len(facts)), file=sys.stderr)
         if unverifiable:

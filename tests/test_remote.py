@@ -13,6 +13,7 @@ from cartographer.remote import (
     fact_status,
     fetch_remote_file,
 )
+from tests.test_cli import _write_remote_chart as _write_remote_chart_local
 from tests.test_cli import fact, write_chart, write_world
 
 
@@ -364,6 +365,36 @@ def test_load_sources_validates_repo_branch_and_key(tmp_path, capsys):
         if key != "ok":
             assert repr(key) in err, key
     assert err.count("warning") == len(entries) - 1
+
+
+def test_non_utf8_pinned_file_reports_not_crashes(tmp_path):
+    world = write_world(tmp_path)
+    chart = write_chart(tmp_path, world)
+    facts = json.loads((chart / "flow.json").read_text())
+    (world / "svc-a" / "src" / "publish.py").write_bytes(b"\xff\xfe\x00bad\n")
+    status = chart_status(chart, world, facts, fetch=_recording_fetch([]))
+    assert status[anchor_key(facts[0])] == DRIFTED
+
+
+def test_directory_as_pinned_path_is_drifted(tmp_path):
+    world = write_world(tmp_path)
+    chart = write_chart(tmp_path, world)
+    facts = json.loads((chart / "flow.json").read_text())
+    target = world / "svc-a" / "src" / "publish.py"
+    target.unlink()
+    target.mkdir()
+    status = chart_status(chart, world, facts, fetch=_recording_fetch([]))
+    assert status[anchor_key(facts[0])] == DRIFTED
+
+
+def test_remote_snapshot_excludes_present_files(tmp_path):
+    from cartographer.remote import remote_snapshot
+
+    chart, world, original_text = _write_remote_chart_local(tmp_path)
+    facts = json.loads((chart / "flow.json").read_text())
+    snap = remote_snapshot(chart, world, facts, fetch=lambda s, p: original_text)
+    assert anchor_key(facts[0]) not in snap  # svc-a is present locally
+    assert snap[anchor_key(facts[1])] == OK  # svc-b came from the fake host
 
 
 def test_check_survives_unreadable_sources_json(tmp_path, capsys):

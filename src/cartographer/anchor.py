@@ -18,7 +18,22 @@ def normalize(text: str) -> str:
 
 
 def excerpt_hash(text: str) -> str:
-    return "sha256:" + hashlib.sha256(normalize(text).encode()).hexdigest()
+    digest = hashlib.sha256(normalize(text).encode("utf-8", errors="surrogateescape"))
+    return "sha256:" + digest.hexdigest()
+
+
+def read_pinned_text(path: Path) -> str | None:
+    """Text of a pinned file, or None when the path is not a readable
+    regular file. Undecodable bytes survive via surrogateescape so a
+    non-UTF-8 file gets a verdict (its hash will not match) rather than
+    an exception."""
+    p = Path(path)
+    if not p.is_file():
+        return None
+    try:
+        return p.read_bytes().decode("utf-8", errors="surrogateescape")
+    except OSError:
+        return None
 
 
 def _slice(text: str, lines: tuple[int, int]) -> str:
@@ -35,7 +50,9 @@ def _slice(text: str, lines: tuple[int, int]) -> str:
 def make_code_anchor(
     world: Path, path: str, lines: tuple[int, int] | None, revision: str, at: str
 ) -> dict:
-    text = (Path(world) / path).read_text()
+    text = read_pinned_text(Path(world) / path)
+    if text is None:
+        raise FileNotFoundError(f"not a readable file: {Path(world) / path}")
     excerpt = text if lines is None else _slice(text, lines)
     if normalize(excerpt) == "":
         raise ValueError(
@@ -71,10 +88,10 @@ def verify_excerpt(text: str, anchor: dict) -> bool:
 
 
 def verify_anchor(world: Path, anchor: dict) -> bool:
-    p = Path(world) / anchor["path"]
-    if not p.exists():
+    text = read_pinned_text(Path(world) / anchor["path"])
+    if text is None:
         return False
-    return verify_excerpt(p.read_text(), anchor)
+    return verify_excerpt(text, anchor)
 
 
 def identity(fact: dict) -> tuple:
@@ -101,7 +118,7 @@ def _find_excerpt(world: Path, path: str, anchor: dict) -> list[tuple[int, int]]
         return []
     lo, hi = anchor["lines"]
     span = hi - lo + 1
-    body = normalize((Path(world) / path).read_text()).split("\n")
+    body = normalize(read_pinned_text(Path(world) / path) or "").split("\n")
     hits: list[tuple[int, int]] = []
     for start in range(1, len(body) - span + 2):
         window = "\n".join(body[start - 1 : start - 1 + span])
@@ -141,12 +158,14 @@ def dispose(
 
     if path in deleted:
         # rename-follow: a created file with an identical whole-file hash
-        old_hash = excerpt_hash((Path(prev_world) / path).read_text())
-        twins = [
-            c
-            for c in sorted(created)
-            if excerpt_hash((Path(world) / c).read_text()) == old_hash
-        ]
+        prev_text = read_pinned_text(Path(prev_world) / path)
+        twins: list[str] = []
+        if prev_text is not None:
+            old_hash = excerpt_hash(prev_text)
+            for c in sorted(created):
+                text = read_pinned_text(Path(world) / c)
+                if text is not None and excerpt_hash(text) == old_hash:
+                    twins.append(c)
         if len(twins) == 1:
             twin = twins[0]
             if anchor["lines"] is None:

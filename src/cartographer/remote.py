@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 from urllib.parse import quote
 
-from cartographer.anchor import verify_excerpt
+from cartographer.anchor import read_pinned_text, verify_excerpt
 
 SOURCES_NAME = "sources.json"
 _REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
@@ -116,6 +116,12 @@ def fetch_remote_file(source: dict, path_in_repo: str) -> str | None:
     return proc.stdout
 
 
+def never_fetch(source: dict, path_in_repo: str) -> str | None:
+    """A fetch that always fails; used when a live fetch is not allowed
+    (mid-session serving) so the offline rule still decides."""
+    return None
+
+
 def fact_status(
     world: Path,
     sources: dict,
@@ -124,13 +130,31 @@ def fact_status(
     _cache: dict | None = None,
 ) -> str:
     anchor = fact["anchor"]
-    rel = Path(anchor["path"])
-    folder = rel.parts[0] if rel.parts else ""
     p = Path(world) / anchor["path"]
     if p.exists():
-        return OK if verify_excerpt(p.read_text(), anchor) else DRIFTED
+        text = read_pinned_text(p)
+        if text is None:
+            return DRIFTED  # a directory or unreadable file is not the pinned text
+        return OK if verify_excerpt(text, anchor) else DRIFTED
+    return absent_file_status(world, sources, fact, fetch=fetch, _cache=_cache)
+
+
+def absent_file_status(
+    world: Path,
+    sources: dict,
+    fact: dict,
+    fetch=fetch_remote_file,
+    _cache: dict | None = None,
+) -> str:
+    """Verdict for a fact whose pinned file is not on disk: the git host
+    if sources.json names the service and the fetch succeeds; otherwise
+    DRIFTED when the service folder is checked out (the file was removed)
+    and UNVERIFIABLE when it is not."""
+    anchor = fact["anchor"]
+    rel = Path(anchor["path"])
     if len(rel.parts) < 2:
         return UNVERIFIABLE
+    folder = rel.parts[0]
     src = sources.get(folder)
     if src:
         path_in_repo = str(Path(*rel.parts[1:]))
@@ -161,3 +185,21 @@ def chart_status(
         anchor_key(f): fact_status(world, sources, f, fetch=fetch, _cache=cache)
         for f in facts
     }
+
+
+def remote_snapshot(
+    chart_dir: Path, world: Path, facts: list[dict], fetch=fetch_remote_file
+) -> dict[tuple, str]:
+    """Startup snapshot for serving: verdicts ONLY for facts whose pinned
+    file is absent locally. Present files re-verify live on every call, so
+    recording them here would let a file deleted mid-session keep its
+    stale OK."""
+    sources = load_sources(Path(chart_dir).resolve().parent)
+    cache: dict = {}
+    out: dict[tuple, str] = {}
+    for f in facts:
+        if not (Path(world) / f["anchor"]["path"]).exists():
+            out[anchor_key(f)] = absent_file_status(
+                world, sources, f, fetch=fetch, _cache=cache
+            )
+    return out
