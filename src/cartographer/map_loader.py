@@ -5,6 +5,7 @@
 # never silently answer.
 import hashlib
 import json
+import os
 import re
 from pathlib import Path
 
@@ -145,13 +146,33 @@ def lint_facts(facts: list[dict]) -> list[str]:
 MANIFEST_NAME = "chart.manifest"
 
 
-def _fact_files(chart_dir: Path) -> list[Path]:
-    """Fact files are chart/*.json; dotfiles such as .mcp.json never are."""
-    return sorted(
-        p
-        for p in Path(chart_dir).glob("*.json")
-        if not p.name.startswith(".") and p.is_file()
+def _list_chart_dir(chart_dir: Path) -> tuple[list[Path], str | None]:
+    """Candidate fact files: entries named *.json that are not dotfiles,
+    sorted by name. Never raises: a directory that cannot be listed (for
+    example mode 0111) yields no entries and a problem string, so callers
+    fail closed instead of seeing an empty chart."""
+    chart_dir = Path(chart_dir)
+    try:
+        with os.scandir(chart_dir) as it:
+            names = [entry.name for entry in it]
+    except OSError as e:
+        return [], f"chart directory not listable: {chart_dir}: {e}"
+    return (
+        sorted(
+            chart_dir / n
+            for n in names
+            if n.endswith(".json") and not n.startswith(".")
+        ),
+        None,
     )
+
+
+def _fact_files(chart_dir: Path) -> list[Path]:
+    """Fact files are chart/*.json regular files; dotfiles such as .mcp.json
+    never are. An unlistable directory yields []; _read_fact_files reports
+    that as a problem, and every loader calls it first."""
+    entries, _problem = _list_chart_dir(chart_dir)
+    return [p for p in entries if p.is_file()]
 
 
 def _read_fact_files(chart_dir: Path) -> tuple[list[dict], list[str]]:
@@ -160,9 +181,10 @@ def _read_fact_files(chart_dir: Path) -> tuple[list[dict], list[str]]:
     verdict and a server never partially loads."""
     facts: list[dict] = []
     problems: list[str] = []
-    for p in sorted(
-        p for p in Path(chart_dir).glob("*.json") if not p.name.startswith(".")
-    ):
+    entries, listing_problem = _list_chart_dir(chart_dir)
+    if listing_problem is not None:
+        problems.append(listing_problem)
+    for p in entries:
         if not p.is_file():
             problems.append(f"{p.name}: not a regular file")
             continue
@@ -186,10 +208,12 @@ def _read_fact_files(chart_dir: Path) -> tuple[list[dict], list[str]]:
 
 
 def _not_a_chart_hint(chart_dir: Path) -> list[str]:
-    """Pointed at a map root instead of its chart/ subdirectory."""
+    """Pointed at a map root instead of its chart/ subdirectory. A chart is
+    a flat directory of *.json files, so a chart/ subdirectory means the
+    caller is one level too high; a stray manifest here changes nothing."""
     chart_dir = Path(chart_dir)
     nested = chart_dir / "chart"
-    if not (chart_dir / MANIFEST_NAME).exists() and nested.is_dir():
+    if nested.is_dir():
         return [
             (
                 f"not a chart directory (expected {MANIFEST_NAME} and *.json fact "
@@ -213,6 +237,11 @@ def verify_manifest(chart_dir: Path) -> list[str]:
     if not isinstance(manifest, dict) or not isinstance(manifest.get("files"), dict):
         return ['chart manifest malformed: expected {"files": {...}, "fact_count": N}']
     problems: list[str] = []
+    if not manifest["files"]:
+        problems.append(
+            "chart manifest lists no fact files: nothing to serve "
+            "(run `cartographer seal` on the real chart directory)"
+        )
     fact_files = {p.name for p in _fact_files(chart_dir)}
     listed = set(manifest["files"])
     for name in sorted(fact_files - listed):
