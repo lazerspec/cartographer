@@ -1,4 +1,5 @@
 import json
+import os
 
 import pytest
 
@@ -327,3 +328,169 @@ def test_lint_rejects_empty_excerpt_hash():
     f = _anchored_fact()
     f["anchor"] = dict(f["anchor"], content_hash=excerpt_hash(""))
     assert any("empty excerpt" in p for p in lint_facts([f]))
+
+
+def test_dotfiles_and_non_list_files_are_lint_problems(tmp_path):
+    import json as _json
+
+    from cartographer.map_loader import load_chart
+
+    (tmp_path / ".mcp.json").write_text(_json.dumps({"mcpServers": {}}))
+    (tmp_path / "sources.json").write_text(_json.dumps({"svc": {"repo": "o/r"}}))
+    (tmp_path / "s.json").write_text(_json.dumps([_anchored_fact()]))
+    facts, problems = load_chart(tmp_path, require_manifest=False)
+    assert len(facts) == 1
+    assert any("sources.json: top level must be a JSON list" in p for p in problems)
+    assert not any(".mcp.json" in p for p in problems)
+
+
+def test_corrupt_manifest_and_fact_json_are_lint_problems(tmp_path):
+    import json as _json
+
+    from cartographer.map_loader import LintError, load_sealed_chart
+
+    (tmp_path / "s.json").write_text(_json.dumps([_anchored_fact()]))
+    _write_manifest(tmp_path)
+    (tmp_path / "chart.manifest").write_text("{not json")
+    with pytest.raises(LintError) as exc:
+        load_sealed_chart(tmp_path)
+    assert any("chart manifest unreadable" in p for p in exc.value.problems)
+
+    _write_manifest(tmp_path)
+    (tmp_path / "s.json").write_text("[{broken")
+    with pytest.raises(LintError) as exc:
+        load_sealed_chart(tmp_path)
+    assert any("invalid JSON in s.json" in p for p in exc.value.problems)
+
+
+def test_map_root_instead_of_chart_gets_a_hint(tmp_path):
+    from cartographer.map_loader import LintError, load_sealed_chart
+
+    (tmp_path / "chart").mkdir()
+    with pytest.raises(LintError) as exc:
+        load_sealed_chart(tmp_path)
+    assert any("did you mean" in p and "chart" in p for p in exc.value.problems)
+
+
+def test_manifest_shape_and_entries_are_validated(tmp_path):
+    import json as _json
+
+    from cartographer.map_loader import verify_manifest
+
+    (tmp_path / "s.json").write_text(_json.dumps([_anchored_fact()]))
+    for bad in ("[]", '"x"', "5", _json.dumps({"files": []})):
+        (tmp_path / "chart.manifest").write_text(bad)
+        assert any(
+            "manifest malformed" in p or "manifest unreadable" in p
+            for p in verify_manifest(tmp_path)
+        ), bad
+    _write_manifest(tmp_path)
+    m = _json.loads((tmp_path / "chart.manifest").read_text())
+    for name in ("../s.json", "/etc/s.json", ".hidden.json", "s.txt", "sub/s.json"):
+        m2 = {
+            "files": dict(m["files"], **{name: m["files"]["s.json"]}),
+            "fact_count": m["fact_count"],
+        }
+        (tmp_path / "chart.manifest").write_text(_json.dumps(m2))
+        assert any("invalid entry" in p for p in verify_manifest(tmp_path)), name
+    m3 = {"files": m["files"], "fact_count": True}
+    (tmp_path / "chart.manifest").write_text(_json.dumps(m3))
+    assert any("fact_count" in p for p in verify_manifest(tmp_path))
+
+
+def test_non_regular_chart_entries_are_lint_problems(tmp_path):
+    import json as _json
+
+    from cartographer.map_loader import LintError, load_chart, load_sealed_chart
+
+    (tmp_path / "s.json").write_text(_json.dumps([_anchored_fact()]))
+    _write_manifest(tmp_path)
+    (tmp_path / "sub.json").mkdir()
+    (tmp_path / "dangling.json").symlink_to(tmp_path / "nowhere")
+    facts, problems = load_chart(tmp_path, require_manifest=False)
+    assert len(facts) == 1
+    assert any("sub.json: not a regular file" in p for p in problems)
+    assert any("dangling.json: not a regular file" in p for p in problems)
+    (tmp_path / "chart.manifest").unlink()
+    (tmp_path / "chart.manifest").mkdir()
+    with pytest.raises(LintError) as exc:
+        load_sealed_chart(tmp_path)
+    assert any("manifest is not a regular file" in p for p in exc.value.problems)
+
+
+def test_pathological_json_nesting_is_a_lint_problem(tmp_path):
+    from cartographer.map_loader import load_chart
+
+    (tmp_path / "s.json").write_text("[" * 100000)
+    facts, problems = load_chart(tmp_path, require_manifest=False)
+    assert facts == []
+    assert any("invalid JSON in s.json" in p for p in problems)
+
+
+def test_manifest_listing_a_directory_is_a_problem(tmp_path):
+    import json as _json
+
+    from cartographer.map_loader import verify_manifest
+
+    (tmp_path / "s.json").write_text(_json.dumps([_anchored_fact()]))
+    _write_manifest(tmp_path)
+    m = _json.loads((tmp_path / "chart.manifest").read_text())
+    m["files"]["d.json"] = m["files"]["s.json"]
+    (tmp_path / "chart.manifest").write_text(_json.dumps(m))
+    (tmp_path / "d.json").mkdir()
+    problems = verify_manifest(tmp_path)
+    assert any(
+        "d.json" in p and ("missing file" in p or "not a regular file" in p)
+        for p in problems
+    )
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
+def test_unreadable_files_are_problems_not_exceptions(tmp_path):
+    import json as _json
+
+    from cartographer.map_loader import load_chart, verify_manifest
+
+    (tmp_path / "s.json").write_text(_json.dumps([_anchored_fact()]))
+    _write_manifest(tmp_path)
+    os.chmod(tmp_path / "s.json", 0)
+    try:
+        _facts, problems = load_chart(tmp_path)
+        assert any("unreadable" in p and "s.json" in p for p in problems)
+        assert any("unreadable" in p for p in verify_manifest(tmp_path))
+        os.chmod(tmp_path / "chart.manifest", 0)
+        assert any("manifest unreadable" in p for p in verify_manifest(tmp_path))
+    finally:
+        os.chmod(tmp_path / "s.json", 0o644)
+        os.chmod(tmp_path / "chart.manifest", 0o644)
+
+
+def test_seal_and_manifest_share_the_dotfile_and_regular_file_filter(tmp_path):
+    import json as _json
+
+    from cartographer.map_loader import _fact_files
+
+    (tmp_path / "s.json").write_text(_json.dumps([_anchored_fact()]))
+    (tmp_path / ".hidden.json").write_text("[]")
+    (tmp_path / "dir.json").mkdir()
+    assert [p.name for p in _fact_files(tmp_path)] == ["s.json"]
+
+
+def test_manifest_entry_validation_details(tmp_path):
+    import json as _json
+
+    from cartographer.map_loader import verify_manifest
+
+    (tmp_path / "s.json").write_text(_json.dumps([_anchored_fact()]))
+    _write_manifest(tmp_path)
+    m = _json.loads((tmp_path / "chart.manifest").read_text())
+    good = m["files"]["s.json"]
+    for files in ({"sub\\s.json": good}, {"s.json": 12345}):
+        (tmp_path / "chart.manifest").write_text(
+            _json.dumps({"files": files, "fact_count": 1})
+        )
+        assert any("invalid entry" in p for p in verify_manifest(tmp_path)), files
+    (tmp_path / "chart.manifest").write_text(
+        _json.dumps({"files": {"s.json": good}, "fact_count": "1"})
+    )
+    assert any("fact_count" in p for p in verify_manifest(tmp_path))
