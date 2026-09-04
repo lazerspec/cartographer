@@ -3,12 +3,16 @@ without cloning anything. Single-file fetches via the GitHub CLI (gh),
 in memory only. Facts are never modified here."""
 
 import json
+import re
 import subprocess
+import sys
 from pathlib import Path
+from urllib.parse import quote
 
 from cartographer.anchor import verify_excerpt
 
 SOURCES_NAME = "sources.json"
+_REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 
 # Status values per fact anchor
 OK = "ok"
@@ -21,29 +25,80 @@ def anchor_key(fact: dict) -> tuple:
     return (a["path"], tuple(a["lines"] or ()), a["content_hash"])
 
 
+def _warn(msg: str) -> None:
+    print(f"cartographer: warning: {msg}", file=sys.stderr)
+
+
 def load_sources(map_root: Path) -> dict:
+    """sources.json as {service_folder: {"repo": "owner/name", ...}}.
+    Malformed files or entries are reported once on stderr and treated as
+    absent, so the affected facts become UNVERIFIABLE instead of crashing."""
     p = Path(map_root) / SOURCES_NAME
     if not p.exists():
         return {}
-    try:
-        data = json.loads(p.read_text())
-    except json.JSONDecodeError:
+    if not p.is_file():
+        _warn(f"{p}: not a regular file, ignoring")
         return {}
-    return data if isinstance(data, dict) else {}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as e:
+        _warn(f"{p}: unreadable or invalid JSON, ignoring all entries ({e})")
+        return {}
+    if not isinstance(data, dict):
+        _warn(f"{p}: expected a JSON object mapping service folder to entry")
+        return {}
+    out: dict = {}
+    for key, entry in data.items():
+        reason: str | None = None
+        if not (
+            isinstance(key, str)
+            and key
+            and key == key.strip()
+            and "/" not in key
+            and "\\" not in key
+            and key not in (".", "..")
+        ):
+            reason = "key must be a single folder name"
+        elif not isinstance(entry, dict):
+            reason = 'expected {"repo": "owner/name", "branch": "main"}'
+        elif not (
+            isinstance(entry.get("repo"), str) and _REPO_RE.fullmatch(entry["repo"])
+        ) or not all(part.strip(".") for part in entry["repo"].split("/")):
+            reason = "repo must look like owner/name"
+        elif "branch" in entry and not (
+            isinstance(entry.get("branch"), str)
+            and entry["branch"]
+            and not any(c.isspace() for c in entry["branch"])
+            and not any(c in entry["branch"] for c in "?#&")
+        ):
+            reason = "branch must be a non-empty branch name"
+        if reason is None:
+            out[key] = entry
+        else:
+            _warn(f"{p}: entry {key!r} ignored ({reason})")
+    return out
 
 
 def fetch_remote_file(source: dict, path_in_repo: str) -> str | None:
     """Fetch one file's current text at the branch tip via `gh api`.
     Returns None on any failure (gh missing, not signed in, offline,
     file absent). Never raises, never writes to disk or stdout."""
+    if not isinstance(source, dict) or not path_in_repo:
+        return None
     repo = source.get("repo")
     branch = source.get("branch", "main")
     if not repo:
         return None
+    if not isinstance(branch, str) or not branch:
+        return None
+    endpoint = (
+        f"repos/{repo}/contents/{quote(path_in_repo, safe='/')}"
+        f"?ref={quote(branch, safe='')}"
+    )
     cmd = [
         "gh",
         "api",
-        f"repos/{repo}/contents/{path_in_repo}?ref={branch}",
+        endpoint,
         "-H",
         "Accept: application/vnd.github.raw",
     ]
@@ -74,9 +129,11 @@ def fact_status(
     p = Path(world) / anchor["path"]
     if p.exists():
         return OK if verify_excerpt(p.read_text(), anchor) else DRIFTED
+    if len(rel.parts) < 2:
+        return UNVERIFIABLE
     src = sources.get(folder)
     if src:
-        path_in_repo = str(Path(*rel.parts[1:])) if len(rel.parts) > 1 else ""
+        path_in_repo = str(Path(*rel.parts[1:]))
         key = (folder, path_in_repo)
         if _cache is not None and key in _cache:
             text = _cache[key]
