@@ -1,5 +1,8 @@
 import json
+import os
 from pathlib import Path
+
+import pytest
 
 from cartographer.remote import (
     DRIFTED,
@@ -236,3 +239,141 @@ def test_anchor_key_changes_on_reanchor(tmp_path):
     f2 = dict(f1)
     f2["anchor"] = dict(f1["anchor"], lines=[2, 2], content_hash="sha256:" + "0" * 64)
     assert anchor_key(f1) != anchor_key(f2)
+
+
+def test_load_sources_ignores_bad_entries_with_warning(tmp_path, capsys):
+    from cartographer.remote import load_sources
+
+    (tmp_path / "sources.json").write_text(
+        json.dumps(
+            {"svc": "org/svc", "ok": {"repo": "org/ok"}, "norepo": {"branch": "x"}}
+        )
+    )
+    assert load_sources(tmp_path) == {"ok": {"repo": "org/ok"}}
+    err = capsys.readouterr().err
+    assert "'svc'" in err and "'norepo'" in err and "warning" in err
+
+
+def test_load_sources_invalid_json_warns(tmp_path, capsys):
+    from cartographer.remote import load_sources
+
+    (tmp_path / "sources.json").write_text("{not json")
+    assert load_sources(tmp_path) == {}
+    assert "invalid JSON" in capsys.readouterr().err
+    (tmp_path / "sources.json").write_text("[1, 2]")
+    assert load_sources(tmp_path) == {}
+    assert "expected a JSON object" in capsys.readouterr().err
+
+
+def test_string_source_entry_is_unverifiable_not_crash(tmp_path):
+    world = write_world(tmp_path)
+    chart = write_chart(tmp_path, world)
+    facts = json.loads((chart / "flow.json").read_text())
+    (world / "svc-b" / "src" / "consume.py").unlink()
+    (world / "svc-b").rename(tmp_path / "gone")
+    (chart.parent / "sources.json").write_text(json.dumps({"svc-b": "org/svc-b"}))
+    status = chart_status(chart, world, facts, fetch=_recording_fetch([]))
+    assert status[anchor_key(facts[1])] == UNVERIFIABLE
+    assert fetch_remote_file("org/svc-b", "src/consume.py") is None
+
+
+def test_single_component_path_never_fetches(tmp_path):
+    world = tmp_path / "workspace"
+    world.mkdir()
+    (world / "README.md").write_text("hello\nworld\nagain\n")
+    f = fact(world, "root", "reads_file", "README", "README.md")
+    (world / "README.md").unlink()
+    sources = {"README.md": {"repo": "org/x"}}
+
+    def fetch_never(source, path_in_repo):
+        raise AssertionError("must not fetch the repository root")
+
+    assert fact_status(world, sources, f, fetch=fetch_never) == UNVERIFIABLE
+
+
+def test_fetch_url_encodes_path(monkeypatch):
+    import subprocess as _sp
+
+    seen: list = []
+
+    def fake_run(cmd, **kw):
+        seen.append(cmd)
+
+        class P:
+            returncode = 0
+            stdout = "x"
+
+        return P()
+
+    monkeypatch.setattr(_sp, "run", fake_run)
+    assert fetch_remote_file({"repo": "o/r"}, "a b/c#d.py") == "x"
+    assert "repos/o/r/contents/a%20b/c%23d.py?ref=main" in seen[0][2]
+    assert fetch_remote_file({"repo": "o/r"}, "") is None
+    seen.clear()
+    fetch_remote_file({"repo": "o/r", "branch": "release/1.2"}, "a.py")
+    assert "?ref=release%2F1.2" in seen[0][2]
+    assert fetch_remote_file({"repo": "o/r", "branch": None}, "a.py") is None
+    assert fetch_remote_file({"repo": "o/r", "branch": ["x"]}, "a.py") is None
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
+def test_load_sources_unreadable_file_warns_not_raises(tmp_path, capsys):
+    from cartographer.remote import load_sources
+
+    (tmp_path / "sources.json").mkdir()
+    assert load_sources(tmp_path) == {}
+    assert "not a regular file" in capsys.readouterr().err
+    (tmp_path / "sources.json").rmdir()
+    (tmp_path / "sources.json").write_bytes(b"\xff\xfe\x00")
+    assert load_sources(tmp_path) == {}
+    assert "ignoring all entries" in capsys.readouterr().err
+    (tmp_path / "sources.json").write_text(json.dumps({"svc": {"repo": "org/svc"}}))
+    os.chmod(tmp_path / "sources.json", 0)
+    try:
+        assert load_sources(tmp_path) == {}
+        assert "unreadable or invalid JSON" in capsys.readouterr().err
+    finally:
+        os.chmod(tmp_path / "sources.json", 0o644)
+
+
+def test_load_sources_validates_repo_branch_and_key(tmp_path, capsys):
+    from cartographer.remote import load_sources
+
+    entries = {
+        "ok": {"repo": "acme/svc", "branch": "release/1.2"},
+        "empty_repo": {"repo": ""},
+        "url_repo": {"repo": "https://github.com/acme/svc"},
+        "query_repo": {"repo": "acme/svc?x=1"},
+        "dotdot_repo": {"repo": "../../user"},
+        "dots_repo": {"repo": "acme/.."},
+        "dot_owner": {"repo": "./svc"},
+        "null_branch": {"repo": "acme/svc", "branch": None},
+        "empty_branch": {"repo": "acme/svc", "branch": ""},
+        "amp_branch": {"repo": "acme/svc", "branch": "main&x=1"},
+        "svc/src": {"repo": "acme/svc"},
+        " svc": {"repo": "acme/svc"},
+        "": {"repo": "acme/svc"},
+        ".": {"repo": "acme/svc"},
+    }
+    (tmp_path / "sources.json").write_text(json.dumps(entries))
+    assert load_sources(tmp_path) == {
+        "ok": {"repo": "acme/svc", "branch": "release/1.2"}
+    }
+    err = capsys.readouterr().err
+    for key in entries:
+        if key != "ok":
+            assert repr(key) in err, key
+    assert err.count("warning") == len(entries) - 1
+
+
+def test_check_survives_unreadable_sources_json(tmp_path, capsys):
+    from cartographer.cli import check
+
+    world = write_world(tmp_path)
+    chart = write_chart(tmp_path, world)
+    from cartographer.cli import seal
+
+    seal(chart)
+    (chart.parent / "sources.json").mkdir()
+    assert check(chart, world) == 0  # both services are local; sources is irrelevant
+    assert "not a regular file" in capsys.readouterr().err
