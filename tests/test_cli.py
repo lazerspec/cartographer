@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -391,3 +392,17 @@ def test_seal_refuses_when_manifest_path_is_a_directory(tmp_path):
         seal(chart)
     assert "chart.manifest" in str(exc.value)
     assert (chart / "chart.manifest").is_dir()  # nothing overwritten
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
+def test_seal_refuses_unreadable_fact_file_without_traceback(tmp_path):
+    world = write_world(tmp_path)
+    chart = write_chart(tmp_path, world)
+    os.chmod(chart / "flow.json", 0)
+    try:
+        with pytest.raises(SystemExit) as exc:
+            seal(chart)
+        assert "unreadable" in str(exc.value)
+        assert not (chart / "chart.manifest").exists()
+    finally:
+        os.chmod(chart / "flow.json", 0o644)

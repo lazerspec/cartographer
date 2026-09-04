@@ -1,4 +1,5 @@
 import json
+import os
 
 import pytest
 
@@ -424,3 +425,72 @@ def test_pathological_json_nesting_is_a_lint_problem(tmp_path):
     facts, problems = load_chart(tmp_path, require_manifest=False)
     assert facts == []
     assert any("invalid JSON in s.json" in p for p in problems)
+
+
+def test_manifest_listing_a_directory_is_a_problem(tmp_path):
+    import json as _json
+
+    from cartographer.map_loader import verify_manifest
+
+    (tmp_path / "s.json").write_text(_json.dumps([_anchored_fact()]))
+    _write_manifest(tmp_path)
+    m = _json.loads((tmp_path / "chart.manifest").read_text())
+    m["files"]["d.json"] = m["files"]["s.json"]
+    (tmp_path / "chart.manifest").write_text(_json.dumps(m))
+    (tmp_path / "d.json").mkdir()
+    problems = verify_manifest(tmp_path)
+    assert any(
+        "d.json" in p and ("missing file" in p or "not a regular file" in p)
+        for p in problems
+    )
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
+def test_unreadable_files_are_problems_not_exceptions(tmp_path):
+    import json as _json
+
+    from cartographer.map_loader import load_chart, verify_manifest
+
+    (tmp_path / "s.json").write_text(_json.dumps([_anchored_fact()]))
+    _write_manifest(tmp_path)
+    os.chmod(tmp_path / "s.json", 0)
+    try:
+        _facts, problems = load_chart(tmp_path)
+        assert any("unreadable" in p and "s.json" in p for p in problems)
+        assert any("unreadable" in p for p in verify_manifest(tmp_path))
+        os.chmod(tmp_path / "chart.manifest", 0)
+        assert any("manifest unreadable" in p for p in verify_manifest(tmp_path))
+    finally:
+        os.chmod(tmp_path / "s.json", 0o644)
+        os.chmod(tmp_path / "chart.manifest", 0o644)
+
+
+def test_seal_and_manifest_share_the_dotfile_and_regular_file_filter(tmp_path):
+    import json as _json
+
+    from cartographer.map_loader import _fact_files
+
+    (tmp_path / "s.json").write_text(_json.dumps([_anchored_fact()]))
+    (tmp_path / ".hidden.json").write_text("[]")
+    (tmp_path / "dir.json").mkdir()
+    assert [p.name for p in _fact_files(tmp_path)] == ["s.json"]
+
+
+def test_manifest_entry_validation_details(tmp_path):
+    import json as _json
+
+    from cartographer.map_loader import verify_manifest
+
+    (tmp_path / "s.json").write_text(_json.dumps([_anchored_fact()]))
+    _write_manifest(tmp_path)
+    m = _json.loads((tmp_path / "chart.manifest").read_text())
+    good = m["files"]["s.json"]
+    for files in ({"sub\\s.json": good}, {"s.json": 12345}):
+        (tmp_path / "chart.manifest").write_text(
+            _json.dumps({"files": files, "fact_count": 1})
+        )
+        assert any("invalid entry" in p for p in verify_manifest(tmp_path)), files
+    (tmp_path / "chart.manifest").write_text(
+        _json.dumps({"files": {"s.json": good}, "fact_count": "1"})
+    )
+    assert any("fact_count" in p for p in verify_manifest(tmp_path))

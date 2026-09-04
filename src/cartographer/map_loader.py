@@ -233,11 +233,16 @@ def verify_manifest(chart_dir: Path) -> list[str]:
         if not p.is_file():
             problems.append(f"manifest lists missing file: {name}")
             continue
-        actual = "sha256:" + hashlib.sha256(p.read_bytes()).hexdigest()
+        try:
+            raw = p.read_bytes()
+        except OSError as e:
+            problems.append(f"unreadable chart file {name}: {e}")
+            continue
+        actual = "sha256:" + hashlib.sha256(raw).hexdigest()
         if actual != digest:
             problems.append(f"manifest hash mismatch on {name}")
         try:
-            loaded = json.loads(p.read_text(encoding="utf-8"))
+            loaded = json.loads(raw.decode("utf-8"))
         except (json.JSONDecodeError, UnicodeDecodeError, RecursionError):
             continue  # reported by _read_fact_files
         if isinstance(loaded, list):
