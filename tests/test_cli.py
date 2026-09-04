@@ -406,3 +406,17 @@ def test_seal_refuses_unreadable_fact_file_without_traceback(tmp_path):
         assert not (chart / "chart.manifest").exists()
     finally:
         os.chmod(chart / "flow.json", 0o644)
+
+
+def test_check_non_utf8_and_dir_are_verdicts(tmp_path, capsys):
+    world = write_world(tmp_path)
+    chart = write_chart(tmp_path, world)
+    seal(chart)
+    target = world / "svc-a" / "src" / "publish.py"
+    target.write_bytes(b"\xff\xfe\x00bad\n")
+    assert check(chart, world) == 1
+    assert "DRIFTED" in capsys.readouterr().out
+    target.unlink()
+    target.mkdir()
+    assert check(chart, world) == 1
+    assert "DRIFTED" in capsys.readouterr().out

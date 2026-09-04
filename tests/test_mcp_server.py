@@ -544,3 +544,44 @@ def test_banner_counts_facts_not_anchor_keys(tmp_path):
     )
     out = get_scope_facts(chart, world, {}, "svc-a")
     assert out.startswith("WARNING: 2 of 2")
+
+
+def test_server_and_cli_agree_after_file_removed(tmp_path, capsys):
+    from cartographer.cli import check
+
+    chart, world = _mint(tmp_path)
+    status = compute_status(chart, world)  # startup snapshot: both files present
+    assert status == {}
+    (world / "svc/a.py").unlink()
+    # no sources.json: the service folder is still here, so the file was removed -> DRIFTED
+    out = staleness_check(chart, world, status)
+    assert "1 DRIFTED" in out and "order.total" in out
+    assert STALE_MARK in get_scope_facts(chart, world, status, "order")
+    assert check(chart, world) == 1
+    assert "DRIFTED" in capsys.readouterr().out
+    # with a sources.json entry and no reachable host: UNVERIFIABLE on both sides
+    (chart.parent / "sources.json").write_text(
+        json.dumps({"svc": {"repo": "acme/svc"}})
+    )
+    out = staleness_check(chart, world, status)
+    assert "1 UNVERIFIABLE" in out
+    assert UNVERIFIED_MARK in get_scope_facts(chart, world, status, "order")
+    # _mint's "cart" fact is untouched and still verifies locally, so a bare
+    # unverifiable-only `check` (non-strict) exits 0 per its documented
+    # contract (exit 1 only for drift, zero-verified, or --strict); use
+    # --strict to see the same UNVERIFIABLE-is-a-failure verdict server-side.
+    assert check(chart, world, strict=True, fetch=lambda s, p: None) == 1
+    assert "UNVERIFIABLE" in capsys.readouterr().out
+
+
+def test_tools_give_verdicts_for_dir_and_non_utf8(tmp_path):
+    chart, world = _mint(tmp_path)
+    status = compute_status(chart, world)
+    (world / "svc/a.py").write_bytes(b"\xff\xfe\x00")
+    assert "1 DRIFTED" in staleness_check(chart, world, status)
+    (world / "svc/a.py").unlink()
+    (world / "svc/a.py").mkdir()
+    assert "1 DRIFTED" in staleness_check(chart, world, status)
+    assert STALE_MARK in chart_index(chart, world, status) or "WARNING" in chart_index(
+        chart, world, status
+    )

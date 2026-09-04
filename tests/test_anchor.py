@@ -13,6 +13,7 @@ from cartographer.anchor import (
     make_code_anchor,
     make_external_anchor,
     normalize,
+    read_pinned_text,
     run_ladder,
     verify_anchor,
     verify_excerpt,
@@ -198,6 +199,27 @@ def test_anchor_past_eof_never_verifies(tmp_path):
     assert verify_excerpt("l1\nl2\nl3\n", forged) is False
     assert verify_excerpt("COMPLETELY DIFFERENT\nstuff\n", forged) is False
     assert verify_anchor(tmp_path, forged) is False
+
+
+def test_read_pinned_text_handles_dir_and_bytes(tmp_path):
+    (tmp_path / "d").mkdir()
+    assert read_pinned_text(tmp_path / "d") is None
+    assert read_pinned_text(tmp_path / "missing") is None
+    (tmp_path / "bin.py").write_bytes(b"\xff\xfe\x00bad bytes\n")
+    text = read_pinned_text(tmp_path / "bin.py")
+    assert text is not None
+    assert excerpt_hash(text).startswith("sha256:")  # hashing surrogates never raises
+
+
+def test_verify_anchor_false_for_dir_and_non_utf8(tmp_path):
+    (tmp_path / "a.py").write_text("l1\nl2\n")
+    a = make_code_anchor(tmp_path, "a.py", (1, 2), "r", "t")
+    (tmp_path / "a.py").unlink()
+    (tmp_path / "a.py").mkdir()
+    assert verify_anchor(tmp_path, a) is False
+    (tmp_path / "a.py").rmdir()
+    (tmp_path / "a.py").write_bytes(b"\xff\xfe\x00")
+    assert verify_anchor(tmp_path, a) is False
 
 
 def test_empty_excerpt_cannot_be_anchored(tmp_path):
