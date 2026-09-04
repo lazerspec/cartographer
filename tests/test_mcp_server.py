@@ -585,3 +585,14 @@ def test_tools_give_verdicts_for_dir_and_non_utf8(tmp_path):
     assert STALE_MARK in chart_index(chart, world, status) or "WARNING" in chart_index(
         chart, world, status
     )
+
+
+def test_garbage_snapshot_verdicts_fall_to_offline_rule(tmp_path):
+    from cartographer.map_loader import load_sealed_chart
+
+    chart, world = _mint(tmp_path)
+    (world / "svc/a.py").unlink()
+    facts = load_sealed_chart(chart)
+    for garbage in ("verified", "", 1, True, ["ok"], "OK "):
+        status = {anchor_key(f): garbage for f in facts}
+        assert "1 DRIFTED" in staleness_check(chart, world, status), repr(garbage)

@@ -158,12 +158,14 @@ def dispose(
 
     if path in deleted:
         # rename-follow: a created file with an identical whole-file hash
-        old_hash = excerpt_hash(read_pinned_text(Path(prev_world) / path) or "")
-        twins = [
-            c
-            for c in sorted(created)
-            if excerpt_hash(read_pinned_text(Path(world) / c) or "") == old_hash
-        ]
+        prev_text = read_pinned_text(Path(prev_world) / path)
+        twins: list[str] = []
+        if prev_text is not None:
+            old_hash = excerpt_hash(prev_text)
+            for c in sorted(created):
+                text = read_pinned_text(Path(world) / c)
+                if text is not None and excerpt_hash(text) == old_hash:
+                    twins.append(c)
         if len(twins) == 1:
             twin = twins[0]
             if anchor["lines"] is None:

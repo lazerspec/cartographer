@@ -1,5 +1,7 @@
 """Anchor schema + ladder. All key-free."""
 
+import os
+import threading
 from pathlib import Path
 
 import pytest
@@ -150,6 +152,17 @@ def test_rename_follow_evolved_excerpt_is_l3_carrying_twin(tmp_path):
     assert d.relocate_to == "r/new.py"
 
 
+def test_rename_follow_ignores_unreadable_previous_file(tmp_path):
+    seed = _world(tmp_path, "seed", {"svc/old.py": "a = 1\n"})
+    f = _fact(make_code_anchor(seed, "svc/old.py", (1, 1), "step-00", AT))
+    w0 = tmp_path / "w0"
+    (w0 / "svc" / "old.py").mkdir(parents=True)
+    w1 = _world(tmp_path, "w1", {"svc/empty.py": ""})
+    d = dispose(w0, w1, f, set(), {"svc/old.py"}, {"svc/empty.py"}, "step-01", AT)
+    assert d.tier != "L2"
+    assert not any("renamed" in r for r in d.reasons)
+
+
 def test_deleted_without_twin_is_l4(tmp_path):
     w0 = _world(tmp_path, "w0", {"r/old.py": "a: 1\n"})
     w1 = _world(tmp_path, "w1", {"r/keep.py": "other\n"})
@@ -209,6 +222,20 @@ def test_read_pinned_text_handles_dir_and_bytes(tmp_path):
     text = read_pinned_text(tmp_path / "bin.py")
     assert text is not None
     assert excerpt_hash(text).startswith("sha256:")  # hashing surrogates never raises
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="platform has no FIFOs")
+def test_read_pinned_text_returns_none_for_fifo_without_blocking(tmp_path):
+    fifo = tmp_path / "a.py"
+    os.mkfifo(fifo)
+    result: list = []
+    t = threading.Thread(
+        target=lambda: result.append(read_pinned_text(fifo)), daemon=True
+    )
+    t.start()
+    t.join(timeout=2)
+    assert not t.is_alive(), "read_pinned_text blocked on a FIFO"
+    assert result == [None]
 
 
 def test_verify_anchor_false_for_dir_and_non_utf8(tmp_path):
