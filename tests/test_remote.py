@@ -1,5 +1,8 @@
 import json
+import os
 from pathlib import Path
+
+import pytest
 
 from cartographer.remote import (
     DRIFTED,
@@ -309,8 +312,11 @@ def test_fetch_url_encodes_path(monkeypatch):
     seen.clear()
     fetch_remote_file({"repo": "o/r", "branch": "release/1.2"}, "a.py")
     assert "?ref=release%2F1.2" in seen[0][2]
+    assert fetch_remote_file({"repo": "o/r", "branch": None}, "a.py") is None
+    assert fetch_remote_file({"repo": "o/r", "branch": ["x"]}, "a.py") is None
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
 def test_load_sources_unreadable_file_warns_not_raises(tmp_path, capsys):
     from cartographer.remote import load_sources
 
@@ -321,6 +327,13 @@ def test_load_sources_unreadable_file_warns_not_raises(tmp_path, capsys):
     (tmp_path / "sources.json").write_bytes(b"\xff\xfe\x00")
     assert load_sources(tmp_path) == {}
     assert "ignoring all entries" in capsys.readouterr().err
+    (tmp_path / "sources.json").write_text(json.dumps({"svc": {"repo": "org/svc"}}))
+    os.chmod(tmp_path / "sources.json", 0)
+    try:
+        assert load_sources(tmp_path) == {}
+        assert "unreadable or invalid JSON" in capsys.readouterr().err
+    finally:
+        os.chmod(tmp_path / "sources.json", 0o644)
 
 
 def test_load_sources_validates_repo_branch_and_key(tmp_path, capsys):
@@ -332,6 +345,8 @@ def test_load_sources_validates_repo_branch_and_key(tmp_path, capsys):
         "url_repo": {"repo": "https://github.com/acme/svc"},
         "query_repo": {"repo": "acme/svc?x=1"},
         "dotdot_repo": {"repo": "../../user"},
+        "dots_repo": {"repo": "acme/.."},
+        "dot_owner": {"repo": "./svc"},
         "null_branch": {"repo": "acme/svc", "branch": None},
         "empty_branch": {"repo": "acme/svc", "branch": ""},
         "amp_branch": {"repo": "acme/svc", "branch": "main&x=1"},

@@ -63,7 +63,7 @@ def load_sources(map_root: Path) -> dict:
             reason = 'expected {"repo": "owner/name", "branch": "main"}'
         elif not (
             isinstance(entry.get("repo"), str) and _REPO_RE.fullmatch(entry["repo"])
-        ):
+        ) or not all(part.strip(".") for part in entry["repo"].split("/")):
             reason = "repo must look like owner/name"
         elif "branch" in entry and not (
             isinstance(entry.get("branch"), str)
@@ -88,6 +88,8 @@ def fetch_remote_file(source: dict, path_in_repo: str) -> str | None:
     repo = source.get("repo")
     branch = source.get("branch", "main")
     if not repo:
+        return None
+    if not isinstance(branch, str) or not branch:
         return None
     endpoint = (
         f"repos/{repo}/contents/{quote(path_in_repo, safe='/')}"
